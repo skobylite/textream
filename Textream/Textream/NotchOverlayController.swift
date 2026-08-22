@@ -289,7 +289,10 @@ class NotchOverlayController: NSObject {
             baseHeight: panelHeight,
             followingCursor: true
         )
-        let contentView = NSHostingView(rootView: floatingView)
+        let axis = settings.mirrorOverlay ? settings.mirrorAxis : nil
+        let contentView = NSHostingView(
+            rootView: floatingView.scaleEffect(x: axis?.scaleX ?? 1, y: axis?.scaleY ?? 1)
+        )
 
         let panel = NSPanel(
             contentRect: initialFrame,
@@ -319,7 +322,7 @@ class NotchOverlayController: NSObject {
         let fullscreenView = ExternalDisplayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
-            mirrorAxis: nil
+            mirrorAxis: settings.mirrorOverlay ? settings.mirrorAxis : nil
         )
         let contentView = NSHostingView(rootView: fullscreenView)
 
@@ -356,7 +359,10 @@ class NotchOverlayController: NSObject {
             speechRecognizer: speechRecognizer,
             baseHeight: panelHeight
         )
-        let contentView = NSHostingView(rootView: floatingView)
+        let axis = settings.mirrorOverlay ? settings.mirrorAxis : nil
+        let contentView = NSHostingView(
+            rootView: floatingView.scaleEffect(x: axis?.scaleX ?? 1, y: axis?.scaleY ?? 1)
+        )
 
         let panel = NSPanel(
             contentRect: NSRect(x: xPosition, y: yPosition, width: panelWidth, height: panelHeight),
