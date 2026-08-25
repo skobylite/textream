@@ -301,7 +301,12 @@ class BrowserServer {
         <html lang="en">
         <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Textream">
+        <meta name="theme-color" content="#000000">
         <title>Textream</title>
         <style>
         *{margin:0;padding:0;box-sizing:border-box}
@@ -340,7 +345,8 @@ class BrowserServer {
         /* Text: match ExternalDisplayView font sizing: max(48, min(96, width/14)) */
         #text-container{
           font-size:clamp(48px,calc(100vw / 14),96px);
-          font-weight:600;line-height:1.4;word-wrap:break-word}
+          font-weight:600;line-height:1.4;word-wrap:break-word;
+          max-width:var(--col,100%);margin:0 auto}
         .w{display:inline;transition:color .12s ease}
         .w.ann{font-style:italic}
 
@@ -360,9 +366,12 @@ class BrowserServer {
           background:#facc15;opacity:0;transition:opacity .2s}
         #mic-dot.on{opacity:1}
 
-        /* Mirror control — sits above every screen so the rig can be set up
-           before the prompter starts, and stays unflipped when mirroring. */
-        #mirror-btn{position:fixed;top:12px;right:12px;z-index:10;
+        /* Controls — sit above every screen so the rig can be set up before the
+           prompter starts, and stay unflipped when mirroring. */
+        #controls{position:fixed;z-index:10;display:flex;gap:8px;
+          top:calc(12px + env(safe-area-inset-top));
+          right:calc(12px + env(safe-area-inset-right))}
+        #controls button{
           height:36px;padding:0 12px;border-radius:18px;border:0;
           background:rgba(255,255,255,.12);color:rgba(255,255,255,.55);
           display:flex;align-items:center;justify-content:center;gap:6px;
@@ -370,8 +379,8 @@ class BrowserServer {
           cursor:pointer;-webkit-tap-highlight-color:transparent;
           backdrop-filter:blur(8px);
           transition:background .2s ease,color .2s ease}
-        #mirror-btn .glyph{font-size:14px}
-        #mirror-btn.on{background:rgba(250,204,21,.22);color:#facc15}
+        #controls .glyph{font-size:14px}
+        #controls button.on{background:rgba(250,204,21,.22);color:#facc15}
 
         /* Flip the reading surface for teleprompter glass. */
         body.mirrored #waiting,body.mirrored #main,body.mirrored #done{
@@ -395,18 +404,26 @@ class BrowserServer {
           #bar{padding:10px 5% 20px}
           #waveform{width:160px;height:28px}
           #text-container{font-size:clamp(28px,calc(100vw / 10),60px)}
-          #mirror-btn{padding:0 10px;top:10px;right:10px}
+          #controls{top:calc(10px + env(safe-area-inset-top));
+            right:calc(10px + env(safe-area-inset-right))}
+          #controls button{padding:0 10px}
           #mirror-btn .label{display:none}
         }
         </style>
         </head>
         <body>
 
-        <button id="mirror-btn" type="button" aria-pressed="false"
-          title="Mirror for teleprompter glass">
-          <span class="glyph" aria-hidden="true">⇄</span>
-          <span class="label">Mirror</span>
-        </button>
+        <div id="controls">
+          <button id="width-btn" type="button" title="Column width">
+            <span class="glyph" aria-hidden="true">↔</span>
+            <span id="width-label">100%</span>
+          </button>
+          <button id="mirror-btn" type="button" aria-pressed="false"
+            title="Mirror for teleprompter glass">
+            <span class="glyph" aria-hidden="true">⇄</span>
+            <span class="label">Mirror</span>
+          </button>
+        </div>
 
         <div id="waiting">
           <div class="icon">📡</div>
@@ -434,7 +451,10 @@ class BrowserServer {
         <script>
         const WSP=\(wsPort),host=location.hostname;
         const MIRROR_KEY='textream.remote.mirror';
-        let ws,rt,prevWordKey='',scrollTgt=null,mirrored=false;
+        const WIDTH_KEY='textream.remote.width';
+        // A wide landscape phone gives long lines and a lot of eye movement.
+        const WIDTHS=[100,80,65,50,35];
+        let ws,rt,prevWordKey='',scrollTgt=null,mirrored=false,widthIdx=0;
 
         /* ---- helpers ---- */
 
@@ -450,6 +470,31 @@ class BrowserServer {
           return m?m.slice(0,3).map(Number):[255,255,255];
         }
         function rgba(rgb,a){return 'rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+a+')';}
+
+        /* ---- column width ---- */
+
+        function applyWidth(){
+          const w=WIDTHS[widthIdx];
+          document.documentElement.style.setProperty('--col',w+'%');
+          document.getElementById('width-label').textContent=w+'%';
+          document.getElementById('width-btn')
+            .classList.toggle('on',w!==100);
+        }
+
+        function initWidth(){
+          const q=parseInt(new URLSearchParams(location.search).get('width'),10);
+          let stored=null;
+          try{stored=parseInt(localStorage.getItem(WIDTH_KEY),10)}catch(e){}
+          const want=Number.isFinite(q)?q:stored;
+          const i=WIDTHS.indexOf(want);
+          widthIdx=i>=0?i:0;
+          document.getElementById('width-btn').addEventListener('click',()=>{
+            widthIdx=(widthIdx+1)%WIDTHS.length;
+            try{localStorage.setItem(WIDTH_KEY,WIDTHS[widthIdx])}catch(e){}
+            applyWidth();
+          });
+          applyWidth();
+        }
 
         /* ---- mirror ---- */
 
@@ -651,6 +696,7 @@ class BrowserServer {
         for(let i=0;i<30;i++){const b=document.createElement('div');
           b.className='wf';b.style.height='2px';wfInit.appendChild(b)}
 
+        initWidth();
         initMirror();
         connect();
         </script>
