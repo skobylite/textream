@@ -344,7 +344,7 @@ class BrowserServer {
 
         /* Text: match ExternalDisplayView font sizing: max(48, min(96, width/14)) */
         #text-container{
-          font-size:clamp(48px,calc(100vw / 14),96px);
+          font-size:calc(clamp(48px,calc(100vw / 14),96px) * var(--size,1));
           font-weight:600;line-height:1.4;word-wrap:break-word;
           max-width:var(--col,100%);margin:0 auto}
         .w{display:inline;transition:color .12s ease}
@@ -403,7 +403,8 @@ class BrowserServer {
           #prompter{padding:16px 5%}
           #bar{padding:10px 5% 20px}
           #waveform{width:160px;height:28px}
-          #text-container{font-size:clamp(28px,calc(100vw / 10),60px)}
+          #text-container{
+            font-size:calc(clamp(28px,calc(100vw / 10),60px) * var(--size,1))}
           #controls{top:calc(10px + env(safe-area-inset-top));
             right:calc(10px + env(safe-area-inset-right))}
           #controls button{padding:0 10px}
@@ -414,6 +415,10 @@ class BrowserServer {
         <body>
 
         <div id="controls">
+          <button id="size-btn" type="button" title="Text size">
+            <span class="glyph" aria-hidden="true">A</span>
+            <span id="size-label">M</span>
+          </button>
           <button id="width-btn" type="button" title="Column width">
             <span class="glyph" aria-hidden="true">↔</span>
             <span id="width-label">100%</span>
@@ -452,9 +457,12 @@ class BrowserServer {
         const WSP=\(wsPort),host=location.hostname;
         const MIRROR_KEY='textream.remote.mirror';
         const WIDTH_KEY='textream.remote.width';
+        const SIZE_KEY='textream.remote.size';
+        const SIZES=[['XS',.6],['S',.8],['M',1],['L',1.25],['XL',1.5]];
         // A wide landscape phone gives long lines and a lot of eye movement.
         const WIDTHS=[100,80,65,50,35];
-        let ws,rt,prevWordKey='',scrollTgt=null,mirrored=false,widthIdx=0;
+        let ws,rt,prevWordKey='',scrollTgt=null,mirrored=false,
+            widthIdx=0,sizeIdx=2;
 
         /* ---- helpers ---- */
 
@@ -470,6 +478,30 @@ class BrowserServer {
           return m?m.slice(0,3).map(Number):[255,255,255];
         }
         function rgba(rgb,a){return 'rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+a+')';}
+
+        /* ---- text size ---- */
+
+        function applySize(){
+          const [label,scale]=SIZES[sizeIdx];
+          document.documentElement.style.setProperty('--size',scale);
+          document.getElementById('size-label').textContent=label;
+          document.getElementById('size-btn').classList.toggle('on',scale!==1);
+        }
+
+        function initSize(){
+          const q=new URLSearchParams(location.search).get('size');
+          let stored=null;
+          try{stored=localStorage.getItem(SIZE_KEY)}catch(e){}
+          const want=(q||stored||'').toUpperCase();
+          const i=SIZES.findIndex(x=>x[0]===want);
+          sizeIdx=i>=0?i:2;
+          document.getElementById('size-btn').addEventListener('click',()=>{
+            sizeIdx=(sizeIdx+1)%SIZES.length;
+            try{localStorage.setItem(SIZE_KEY,SIZES[sizeIdx][0])}catch(e){}
+            applySize();
+          });
+          applySize();
+        }
 
         /* ---- column width ---- */
 
@@ -696,6 +728,7 @@ class BrowserServer {
         for(let i=0;i<30;i++){const b=document.createElement('div');
           b.className='wf';b.style.height='2px';wfInit.appendChild(b)}
 
+        initSize();
         initWidth();
         initMirror();
         connect();

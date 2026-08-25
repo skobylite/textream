@@ -127,6 +127,7 @@ View your teleprompter on **any device** — phone, tablet, or another computer 
 - **QR code** — Scan the generated QR code from your phone or tablet to open the teleprompter instantly.
 - **Real-time sync** — Words highlight, waveform animates, and progress updates in real time over WebSocket.
 - **Mirror mode (per device)** — Tap **Mirror** in the remote view to flip the prompt horizontally for teleprompter glass. The choice is remembered on that device, and `?mirror=1` or `?mirror=0` in the URL presets it.
+- **Text size** — Tap the size control to step the text through XS to XL. Remembered per device, and `?size=L` presets it.
 - **Column width** — Tap the width control to narrow the text column (100% down to 35%). A phone held in landscape gives very long lines and a lot of eye movement; a narrower column keeps the reading line short. Remembered per device, and `?width=50` presets it.
 - **Full screen on iOS** — Add the page to your Home Screen and open it from there. It runs without Safari's toolbars, which otherwise eat vertical space in landscape.
 - **No app needed** — Works in any modern browser. No installation required on the remote device.
