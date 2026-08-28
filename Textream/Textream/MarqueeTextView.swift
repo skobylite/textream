@@ -294,7 +294,9 @@ struct SpeechScrollView: View {
             .overlay(
                 ScrollWheelView(
                     onScroll: { delta in
-                        let canScroll = smoothScroll ? isListening : !isListening
+                        // Word tracking while live: scrolling is a peek — it
+                        // must not fight the tracker, so it eases back on end.
+                        let canScroll = smoothScroll ? isListening : true
                         guard canScroll else { return }
 
                         // Pause timer when user starts scrolling in smooth mode
@@ -332,6 +334,16 @@ struct SpeechScrollView: View {
                             isUserScrolling = false
                             allowsNextBackwardTrackingUpdate = true
                             onManualScroll?(false, newProgress)
+                        } else if isListening {
+                            // Live word tracking: glide back to the tracked
+                            // position after a short pause.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                                if !isUserScrolling {
+                                    withAnimation(.easeInOut(duration: 0.4)) {
+                                        manualOffset = 0
+                                    }
+                                }
+                            }
                         } else {
                             let maxY = wordYPositions.values.max() ?? 0
                             let containerHeight = geo.size.height
