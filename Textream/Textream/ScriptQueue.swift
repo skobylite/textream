@@ -135,7 +135,6 @@ class ScriptQueue {
     // MARK: - Load into editor
 
     func load(_ item: QueueItem) {
-        guard TextreamService.shared.confirmDiscardIfNeeded() else { return }
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return }
         defer { vault.stopAccessingSecurityScopedResource() }
         guard let text = try? String(contentsOf: item.url, encoding: .utf8) else {
@@ -148,11 +147,9 @@ class ScriptQueue {
             .components(separatedBy: "\n---\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let service = TextreamService.shared
-        service.pages = pages.isEmpty ? [body] : pages
-        service.currentPageIndex = 0
-        service.currentFileURL = nil
-        service.savedPages = service.pages   // vault note is the source of truth; no unsaved dot
+        // The current editor is stashed in the draft library, so no dialog.
+        TextreamService.shared.replaceEditor(
+            pages: pages.isEmpty ? [body] : pages, fileURL: nil)
         activePath = item.id
     }
 

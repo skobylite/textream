@@ -177,6 +177,97 @@ class TextreamService: NSObject, ObservableObject {
     @Published var currentFileURL: URL?
     @Published var savedPages: [String] = [""]
 
+    // MARK: - Draft Library
+
+    // Scripts written in Textream should survive switching to another script
+    // without any save dialog. Switching stashes the current editor into this
+    // library; the sidebar lists stashed drafts so they can be reopened.
+    struct Draft: Codable, Identifiable {
+        var id: String
+        var title: String
+        var pages: [String]
+        var pageIndex: Int
+        var filePath: String?
+        var updated: Date
+    }
+
+    @Published var drafts: [Draft] = []
+    /// Library id of the doc currently in the editor, when it came from the library.
+    private var currentDraftID: String?
+
+    private static let libraryKey = "draftLibrary"
+
+    func loadDraftLibrary() {
+        if let data = UserDefaults.standard.data(forKey: Self.libraryKey),
+           let list = try? JSONDecoder().decode([Draft].self, from: data) {
+            drafts = list
+        }
+    }
+
+    private func persistDraftLibrary() {
+        if let data = try? JSONEncoder().encode(drafts) {
+            UserDefaults.standard.set(data, forKey: Self.libraryKey)
+        }
+    }
+
+    private func draftTitle(for pages: [String]) -> String {
+        let first = pages.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+        let line = first.split(separator: "\n").first.map(String.init) ?? "Untitled"
+        return String(line.prefix(60))
+    }
+
+    /// Puts whatever is in the editor into the library. Safe to call any time;
+    /// empty editors and unmodified sample text are not worth keeping.
+    func stashCurrentDraft() {
+        let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !content.isEmpty else { return }
+        let draft = Draft(
+            id: currentDraftID ?? UUID().uuidString,
+            title: currentFileURL?.deletingPathExtension().lastPathComponent
+                ?? draftTitle(for: pages),
+            pages: pages,
+            pageIndex: currentPageIndex,
+            filePath: currentFileURL?.path,
+            updated: Date())
+        drafts.removeAll { $0.id == draft.id }
+        drafts.insert(draft, at: 0)
+        if drafts.count > 30 { drafts = Array(drafts.prefix(30)) }
+        currentDraftID = draft.id
+        persistDraftLibrary()
+    }
+
+    /// Stashes the editor, then brings a library draft back into it.
+    func openDraft(_ draft: Draft) {
+        stashCurrentDraft()
+        pages = draft.pages
+        currentPageIndex = min(draft.pageIndex, draft.pages.count - 1)
+        if let path = draft.filePath, FileManager.default.fileExists(atPath: path) {
+            currentFileURL = URL(fileURLWithPath: path)
+        } else {
+            currentFileURL = nil
+        }
+        savedPages = pages
+        currentDraftID = draft.id
+        ScriptQueue.shared.activePath = nil
+    }
+
+    func deleteDraft(_ id: String) {
+        drafts.removeAll { $0.id == id }
+        if currentDraftID == id { currentDraftID = nil }
+        persistDraftLibrary()
+    }
+
+    /// Replaces the editor content for a queue/new-page style switch: stash
+    /// first, no dialogs.
+    func replaceEditor(pages newPages: [String], fileURL: URL?) {
+        stashCurrentDraft()
+        pages = newPages
+        currentPageIndex = 0
+        currentFileURL = fileURL
+        savedPages = newPages
+        currentDraftID = nil
+    }
+
     // MARK: - Draft Autosave
 
     // Pages only ever lived in memory, so quitting without an explicit save to
@@ -206,6 +297,7 @@ class TextreamService: NSObject, ObservableObject {
         defaults.set(pages, forKey: DraftKey.pages)
         defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
+        if currentDraftID != nil { stashCurrentDraft() }
     }
 
     /// Returns true when a draft was restored, so the caller does not seed the
@@ -213,6 +305,7 @@ class TextreamService: NSObject, ObservableObject {
     @discardableResult
     func restoreDraft() -> Bool {
         defer { draftRestored = true }
+        loadDraftLibrary()
         let defaults = UserDefaults.standard
         guard let stored = defaults.stringArray(forKey: DraftKey.pages),
               !stored.isEmpty,
