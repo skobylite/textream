@@ -239,6 +239,23 @@ class TextreamService: NSObject, ObservableObject {
         currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
         migrateOldLibraryIntoPages()
 
+        // Drop exact-duplicate and empty pages accumulated by earlier builds.
+        var seen = Set<String>()
+        var cleaned: [String] = []
+        for page in pages {
+            let trimmed = page.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || seen.contains(page) { continue }
+            seen.insert(page)
+            cleaned.append(page)
+        }
+        if cleaned.isEmpty { cleaned = [""] }
+        if cleaned != pages {
+            pages = cleaned
+            currentPageIndex = min(currentPageIndex, pages.count - 1)
+        }
+
+        ScriptQueue.shared.restoreOrigins()
+
         // Reattach to the file it came from, so Save still targets it and the
         // unsaved-changes dot stays accurate.
         if let path = defaults.string(forKey: DraftKey.fileURL) {

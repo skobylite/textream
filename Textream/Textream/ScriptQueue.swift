@@ -140,6 +140,35 @@ class ScriptQueue {
     private var lastSynced: [String: String] = [:]
     private var syncWork: DispatchWorkItem?
 
+    private static let originsKey = "vaultPageOrigins"
+
+    /// Origins survive relaunch as [path: body]; indices are rebuilt against
+    /// the restored pages, so page order changes cannot corrupt the mapping.
+    func persistOrigins() {
+        let pages = TextreamService.shared.pages
+        var map: [String: String] = [:]
+        for (idx, path) in pageOrigins where idx < pages.count {
+            map[path] = pages[idx]
+        }
+        UserDefaults.standard.set(map, forKey: Self.originsKey)
+    }
+
+    func restoreOrigins() {
+        guard let map = UserDefaults.standard.dictionary(forKey: Self.originsKey) as? [String: String] else { return }
+        let pages = TextreamService.shared.pages
+        for (path, body) in map {
+            if let idx = pages.firstIndex(of: body) {
+                pageOrigins[idx] = path
+                lastSynced[path] = body
+            }
+        }
+    }
+
+    func clearOrigin(at index: Int) {
+        pageOrigins.removeValue(forKey: index)
+        persistOrigins()
+    }
+
     func load(_ item: QueueItem) {
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return }
         defer { vault.stopAccessingSecurityScopedResource() }
@@ -152,6 +181,16 @@ class ScriptQueue {
         let service = TextreamService.shared
         if let (idx, _) = pageOrigins.first(where: { $0.value == item.id }) {
             service.currentPageIndex = idx        // already open
+            return
+        }
+        if let idx = service.pages.firstIndex(of: body) {
+            // Same content already loaded (e.g. before a relaunch lost the
+            // mapping): reattach instead of appending a duplicate.
+            pageOrigins[idx] = item.id
+            lastSynced[item.id] = body
+            service.currentPageIndex = idx
+            activePath = item.id
+            persistOrigins()
             return
         }
         let cur = service.currentPageIndex
@@ -171,6 +210,7 @@ class ScriptQueue {
         }
         lastSynced[item.id] = body
         activePath = item.id
+        persistOrigins()
     }
 
     /// Keep index->path mappings valid when a page is removed.
@@ -181,6 +221,7 @@ class ScriptQueue {
             updated[i > index ? i - 1 : i] = path
         }
         pageOrigins = updated
+        persistOrigins()
     }
 
     /// Debounced write-back: edits to a vault-backed page rewrite the note's

@@ -794,7 +794,7 @@ Happy presenting! [wave]
         if let path = ScriptQueue.shared.pageOrigins[index] {
             ScriptQueue.shared.syncEdits()          // flush pending edits first
             ScriptQueue.shared.markDone(path)
-            ScriptQueue.shared.pageOrigins.removeValue(forKey: index)
+            ScriptQueue.shared.clearOrigin(at: index)
         }
         if service.pages.count > 1 {
             removePage(at: index)
