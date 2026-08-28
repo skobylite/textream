@@ -18,6 +18,7 @@ struct QueueItem: Identifiable {
     let title: String
     let status: String
     let tags: [String]
+    let completion: Int?   // frontmatter "completion %"
 }
 
 @Observable
@@ -118,7 +119,8 @@ class ScriptQueue {
             found.append(QueueItem(
                 id: file.path, url: file,
                 title: file.deletingPathExtension().lastPathComponent,
-                status: Self.status(in: fm), tags: tags))
+                status: Self.status(in: fm), tags: tags,
+                completion: Self.completion(in: fm)))
         }
         // "Ready to record" first, then other statuses, then untagged.
         func rank(_ s: String) -> Int {
@@ -127,8 +129,10 @@ class ScriptQueue {
             if s == "Scheduled" { return 3 }
             return 2
         }
+        // Highest completion first; within a band, ready-to-record first.
         return .success(found.sorted {
-            (rank($0.status), $0.title) < (rank($1.status), $1.title)
+            (-($0.completion ?? -1), rank($0.status), $0.title)
+                < (-($1.completion ?? -1), rank($1.status), $1.title)
         })
     }
 
@@ -338,6 +342,20 @@ class ScriptQueue {
             } else if !t.isEmpty { break }
         }
         return result
+    }
+
+    /// Show only scripts with completion % >= 90.
+    var highCompletionOnly: Bool = UserDefaults.standard.bool(forKey: "queueHighCompletionOnly") {
+        didSet { UserDefaults.standard.set(highCompletionOnly, forKey: "queueHighCompletionOnly") }
+    }
+
+    var visibleItems: [QueueItem] {
+        highCompletionOnly ? items.filter { ($0.completion ?? 0) >= 90 } : items
+    }
+
+    static func completion(in fm: String) -> Int? {
+        guard let m = fm.range(of: #"(?mi)^completion %:\s*(\d+)"#, options: .regularExpression) else { return nil }
+        return Int(String(fm[m]).components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "")
     }
 
     static func status(in fm: String) -> String {

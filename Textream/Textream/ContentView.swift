@@ -1069,7 +1069,7 @@ private struct ScriptQueueSection: View {
     var body: some View {
         Section {
             if true {
-                ForEach(queue.items) { item in
+                ForEach(queue.visibleItems) { item in
                     Button {
                         queue.load(item)
                     } label: {
@@ -1077,8 +1077,9 @@ private struct ScriptQueueSection: View {
                             Text(item.title)
                                 .font(.system(size: 11, weight: .medium))
                                 .lineLimit(1)
-                            if !item.status.isEmpty {
-                                Text(item.status)
+                            if !item.status.isEmpty || item.completion != nil {
+                                Text([item.completion.map { "\($0)%" }, item.status.isEmpty ? nil : item.status]
+                                    .compactMap { $0 }.joined(separator: " · "))
                                     .font(.system(size: 9))
                                     .foregroundStyle(.tertiary)
                             }
@@ -1109,7 +1110,7 @@ private struct ScriptQueueSection: View {
                         .font(.system(size: 10, weight: .semibold))
                     Text(queue.vaultURL == nil
                          ? "Choose Script Vault…"
-                         : "Scripts (\(queue.items.count))")
+                         : "Scripts (\(queue.visibleItems.count))")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(.secondary)
@@ -1117,6 +1118,10 @@ private struct ScriptQueueSection: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
+                Toggle("Only 90%+ complete", isOn: Binding(
+                    get: { queue.highCompletionOnly },
+                    set: { queue.highCompletionOnly = $0 }))
+                Divider()
                 Button("Rescan") { queue.rescan() }
                 Button("Change Vault…") { queue.pickVault() }
             }
