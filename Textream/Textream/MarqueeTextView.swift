@@ -307,12 +307,16 @@ struct SpeechScrollView: View {
 
                         let maxY = wordYPositions.values.max() ?? 0
                         let containerHeight = geo.size.height
-                        let maxUp = containerHeight * 0.5
-                        let maxDown = max(0, maxY - containerHeight * 0.5)
+
+                        // Absolute bounds: the peek can reach the very top and
+                        // bottom of the script, wherever tracking currently is.
+                        // Rendered position is scrollOffset + manualOffset.
+                        let topOffset = initialScrollOffset(containerHeight: containerHeight)
+                        let bottomOffset = -max(0, maxY - containerHeight * 0.5)
 
                         let newOffset = manualOffset + delta
-                        let upperBound = maxUp
-                        let lowerBound = -maxDown
+                        let upperBound = max(0, topOffset - scrollOffset)
+                        let lowerBound = min(0, bottomOffset - scrollOffset)
 
                         if newOffset > upperBound {
                             let over = newOffset - upperBound
