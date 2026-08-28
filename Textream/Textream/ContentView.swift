@@ -1085,9 +1085,11 @@ private struct ScriptQueueSection: View {
                         }
                         .foregroundStyle(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id ? .primary : .secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 5)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 8))
                     .listRowBackground(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id
                         ? Color.accentColor.opacity(0.15) : nil)
                     .contextMenu {
