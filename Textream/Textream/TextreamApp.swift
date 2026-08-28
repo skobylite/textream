@@ -14,6 +14,14 @@ extension Notification.Name {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        TextreamService.shared.saveDraft()
+    }
+
+    func applicationWillResignActive(_ notification: Notification) {
+        TextreamService.shared.saveDraft()
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         let launchedByURL: Bool

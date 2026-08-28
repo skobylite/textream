@@ -637,8 +637,10 @@ Happy presenting! [wave]
             }
         }
         .onAppear {
-            // Set default text for the first page if empty
-            if service.pages.count == 1 && service.pages[0].isEmpty {
+            // Restore the previous session before seeding the sample script,
+            // so a returning draft is not overwritten.
+            let restored = service.restoreDraft()
+            if !restored, service.pages.count == 1, service.pages[0].isEmpty {
                 service.pages[0] = defaultText
             }
             // Sync button state with overlay
