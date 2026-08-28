@@ -744,7 +744,7 @@ Happy presenting! [wave]
                 }
             }
 
-            BackSection()
+            ScratchpadSection()
 
             ScriptQueueSection()
         }
@@ -1032,32 +1032,39 @@ private struct RemoteQRPanel: View {
 }
 
 
-// MARK: - Back
+// MARK: - Scratchpad
 
-/// One-click return to the previous editor content. Switching scripts stashes
-/// the outgoing state; Back restores it (and stashes the current one, so Back
-/// again toggles).
-private struct BackSection: View {
+/// Every script written in Textream, flat in the sidebar. The open one is
+/// highlighted; clicking another saves the current one and switches.
+private struct ScratchpadSection: View {
     @ObservedObject private var service = TextreamService.shared
 
     var body: some View {
-        if let prev = service.drafts.first {
-            Button {
-                service.goBack()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Back: \(prev.title)")
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
+        if !service.drafts.isEmpty {
+            Section("Scratchpad") {
+                ForEach(service.drafts) { draft in
+                    Button {
+                        service.openDraft(draft)
+                    } label: {
+                        Text(draft.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                            .foregroundStyle(service.currentDraftID == draft.id ? .primary : .secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(service.currentDraftID == draft.id
+                        ? Color.accentColor.opacity(0.15) : nil)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            service.deleteDraft(draft.id)
+                        } label: {
+                            Label("Delete Script", systemImage: "trash")
+                        }
+                    }
                 }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help("Return to the previous script")
         }
     }
 }
@@ -1072,7 +1079,7 @@ private struct ScriptQueueSection: View {
 
     var body: some View {
         Section {
-            if expanded {
+            if true {
                 ForEach(queue.items) { item in
                     Button {
                         queue.load(item)
@@ -1104,9 +1111,7 @@ private struct ScriptQueueSection: View {
             }
         } header: {
             Button {
-                if queue.vaultURL == nil { queue.pickVault(); return }
-                expanded.toggle()
-                if expanded { queue.rescan() }
+                if queue.vaultURL == nil { queue.pickVault() }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "tray.full")
@@ -1115,11 +1120,6 @@ private struct ScriptQueueSection: View {
                          ? "Choose Script Vault…"
                          : "Scripts (\(queue.items.count))")
                         .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    if queue.vaultURL != nil {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
                 }
                 .foregroundStyle(.secondary)
                 .contentShape(Rectangle())
@@ -1128,62 +1128,6 @@ private struct ScriptQueueSection: View {
             .contextMenu {
                 Button("Rescan") { queue.rescan() }
                 Button("Change Vault…") { queue.pickVault() }
-            }
-        }
-    }
-}
-
-
-// MARK: - Draft Library Section
-
-/// Previously edited scripts, restored with one click. Kept automatically —
-/// switching away from a script stashes it here.
-private struct DraftLibrarySection: View {
-    @ObservedObject private var service = TextreamService.shared
-    @State private var expanded = true
-
-    var body: some View {
-        if !service.drafts.isEmpty {
-            Section {
-                if expanded {
-                    ForEach(service.drafts) { draft in
-                        Button {
-                            service.openDraft(draft)
-                        } label: {
-                            Text(draft.title)
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                service.deleteDraft(draft.id)
-                            } label: {
-                                Label("Delete Draft", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
-            } header: {
-                Button {
-                    expanded.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("My Scripts (\(service.drafts.count))")
-                            .font(.system(size: 11, weight: .semibold))
-                        Spacer()
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
-                    .foregroundStyle(.secondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
             }
         }
     }

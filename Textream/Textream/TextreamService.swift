@@ -192,8 +192,8 @@ class TextreamService: NSObject, ObservableObject {
     }
 
     @Published var drafts: [Draft] = []
-    /// Library id of the doc currently in the editor, when it came from the library.
-    private var currentDraftID: String?
+    /// Id of the scratchpad doc currently in the editor, when it is one.
+    @Published private(set) var currentDraftID: String?
 
     private static let libraryKey = "draftLibrary"
 
@@ -222,13 +222,18 @@ class TextreamService: NSObject, ObservableObject {
         return String(line.prefix(60))
     }
 
-    /// Puts whatever is in the editor into the library. Safe to call any time;
-    /// empty editors and unmodified sample text are not worth keeping.
+    /// Saves the editor into its scratchpad slot, in place. A doc emptied out
+    /// is removed; a new non-empty doc gets a slot at the top.
     func stashCurrentDraft() {
         let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        guard !content.isEmpty else { return }
-        // Navigating between two scripts must not pile up copies.
-        if let top = drafts.first, top.pages == pages { return }
+        if content.isEmpty {
+            if let id = currentDraftID {
+                drafts.removeAll { $0.id == id }
+                currentDraftID = nil
+                persistDraftLibrary()
+            }
+            return
+        }
         let draft = Draft(
             id: currentDraftID ?? UUID().uuidString,
             title: currentFileURL?.deletingPathExtension().lastPathComponent
@@ -237,15 +242,19 @@ class TextreamService: NSObject, ObservableObject {
             pageIndex: currentPageIndex,
             filePath: currentFileURL?.path,
             updated: Date())
-        drafts.removeAll { $0.id == draft.id }
-        drafts.insert(draft, at: 0)
-        if drafts.count > 30 { drafts = Array(drafts.prefix(30)) }
+        if let idx = drafts.firstIndex(where: { $0.id == draft.id }) {
+            drafts[idx] = draft
+        } else {
+            drafts.insert(draft, at: 0)
+            if drafts.count > 50 { drafts = Array(drafts.prefix(50)) }
+        }
         currentDraftID = draft.id
         persistDraftLibrary()
     }
 
-    /// Stashes the editor, then brings a library draft back into it.
+    /// Saves the current doc into its slot, then switches to another.
     func openDraft(_ draft: Draft) {
+        guard draft.id != currentDraftID else { return }
         stashCurrentDraft()
         pages = draft.pages
         currentPageIndex = min(draft.pageIndex, draft.pages.count - 1)
@@ -257,37 +266,6 @@ class TextreamService: NSObject, ObservableObject {
         savedPages = pages
         currentDraftID = draft.id
         ScriptQueue.shared.activePath = nil
-    }
-
-    /// Restores the previous editor state. The current state moves to the end
-    /// of the stack, so repeated presses cycle through every kept script.
-    func goBack() {
-        // Skip stack entries identical to what is already on screen.
-        while let top = drafts.first, top.pages == pages {
-            drafts.removeFirst()
-        }
-        guard let prev = drafts.first else { persistDraftLibrary(); return }
-        drafts.removeFirst()
-        let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if !content.isEmpty, prev.pages != pages, !drafts.contains(where: { $0.pages == pages }) {
-            drafts.append(Draft(
-                id: currentDraftID ?? UUID().uuidString,
-                title: currentFileURL?.deletingPathExtension().lastPathComponent
-                    ?? draftTitle(for: pages),
-                pages: pages, pageIndex: currentPageIndex,
-                filePath: currentFileURL?.path, updated: Date()))
-        }
-        pages = prev.pages
-        currentPageIndex = min(prev.pageIndex, prev.pages.count - 1)
-        if let path = prev.filePath, FileManager.default.fileExists(atPath: path) {
-            currentFileURL = URL(fileURLWithPath: path)
-        } else {
-            currentFileURL = nil
-        }
-        savedPages = pages
-        currentDraftID = prev.id
-        ScriptQueue.shared.activePath = nil
-        persistDraftLibrary()
     }
 
     func deleteDraft(_ id: String) {
@@ -336,6 +314,7 @@ class TextreamService: NSObject, ObservableObject {
         defaults.set(pages, forKey: DraftKey.pages)
         defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
+        if currentDraftID != nil { stashCurrentDraft() }
     }
 
     /// Returns true when a draft was restored, so the caller does not seed the
@@ -352,7 +331,11 @@ class TextreamService: NSObject, ObservableObject {
 
         pages = stored
         currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
-        if drafts.first?.pages == pages { drafts.removeFirst(); persistDraftLibrary() }
+        if let match = drafts.first(where: { $0.pages == pages }) {
+            currentDraftID = match.id
+        } else {
+            stashCurrentDraft()   // give the restored doc a visible slot
+        }
 
         // Reattach to the file it came from, so Save still targets it and the
         // unsaved-changes dot stays accurate.
