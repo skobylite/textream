@@ -12,6 +12,7 @@ extension Notification.Name {
     static let openSettings = Notification.Name("openSettings")
     static let openAbout = Notification.Name("openAbout")
     static let startPrompter = Notification.Name("startPrompter")
+    static let newPage = Notification.Name("newPage")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -181,6 +182,13 @@ struct TextreamApp: App {
                 .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(replacing: .newItem) {
+                Button("New Page") {
+                    NotificationCenter.default.post(name: .newPage, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+
+                Divider()
+
                 Button("Open File or Presentation…") {
                     TextreamService.shared.openFile()
                 }
