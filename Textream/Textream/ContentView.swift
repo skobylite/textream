@@ -1083,12 +1083,12 @@ private struct ScriptQueueSection: View {
                                     .foregroundStyle(.tertiary)
                             }
                         }
-                        .foregroundStyle(queue.activePath == item.id ? .primary : .secondary)
+                        .foregroundStyle(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id ? .primary : .secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .listRowBackground(queue.activePath == item.id
+                    .listRowBackground(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id
                         ? Color.accentColor.opacity(0.15) : nil)
                     .contextMenu {
                         Button("Mark Done") { queue.markDone(item.id) }

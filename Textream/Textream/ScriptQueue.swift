@@ -181,6 +181,14 @@ class ScriptQueue {
         }
     }
 
+    /// The page list was replaced wholesale (file open, import, director):
+    /// the slot's index no longer means anything. Flush, then drop it.
+    func resetSlot() {
+        syncEdits()
+        slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil
+        persistSlot()
+    }
+
     func clearOrigin(at index: Int) {
         if slotIndex == index { slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil }
         persistSlot()

@@ -371,6 +371,7 @@ class TextreamService: NSObject, ObservableObject {
             do {
                 let notes = try PresentationNotesExtractor.extractNotes(from: url)
                 DispatchQueue.main.async {
+                    ScriptQueue.shared.resetSlot()
                     self?.pages = notes
                     self?.savedPages = notes
                     self?.currentPageIndex = 0
@@ -419,6 +420,7 @@ class TextreamService: NSObject, ObservableObject {
             let data = try Data(contentsOf: url)
             let loadedPages = try JSONDecoder().decode([String].self, from: data)
             guard !loadedPages.isEmpty else { return }
+            ScriptQueue.shared.resetSlot()
             pages = loadedPages
             savedPages = loadedPages
             currentPageIndex = 0
@@ -480,6 +482,7 @@ class TextreamService: NSObject, ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         // Director mode is single page
+        ScriptQueue.shared.resetSlot()
         pages = [trimmed]
         currentPageIndex = 0
         readPages.removeAll()
@@ -532,6 +535,7 @@ class TextreamService: NSObject, ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        ScriptQueue.shared.resetSlot()
         pages = [trimmed]
 
         let words = splitTextIntoWords(trimmed)

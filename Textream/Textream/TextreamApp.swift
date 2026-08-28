@@ -23,6 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         TextreamService.shared.saveDraft()
+        ScriptQueue.shared.syncEdits()   // flush vault edits before dying
     }
 
     func applicationWillResignActive(_ notification: Notification) {
