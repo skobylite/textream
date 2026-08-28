@@ -177,114 +177,6 @@ class TextreamService: NSObject, ObservableObject {
     @Published var currentFileURL: URL?
     @Published var savedPages: [String] = [""]
 
-    // MARK: - Draft Library
-
-    // Scripts written in Textream should survive switching to another script
-    // without any save dialog. Switching stashes the current editor into this
-    // library; the sidebar lists stashed drafts so they can be reopened.
-    struct Draft: Codable, Identifiable {
-        var id: String
-        var title: String
-        var pages: [String]
-        var pageIndex: Int
-        var filePath: String?
-        var updated: Date
-    }
-
-    @Published var drafts: [Draft] = []
-    /// Id of the scratchpad doc currently in the editor, when it is one.
-    @Published private(set) var currentDraftID: String?
-
-    private static let libraryKey = "draftLibrary"
-
-    func loadDraftLibrary() {
-        if let data = UserDefaults.standard.data(forKey: Self.libraryKey),
-           let list = try? JSONDecoder().decode([Draft].self, from: data) {
-            var seen = Set<[String]>()
-            drafts = list.filter { d in
-                let content = d.pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                guard !content.isEmpty, !seen.contains(d.pages) else { return false }
-                seen.insert(d.pages)
-                return true
-            }
-        }
-    }
-
-    private func persistDraftLibrary() {
-        if let data = try? JSONEncoder().encode(drafts) {
-            UserDefaults.standard.set(data, forKey: Self.libraryKey)
-        }
-    }
-
-    private func draftTitle(for pages: [String]) -> String {
-        let first = pages.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
-        let line = first.split(separator: "\n").first.map(String.init) ?? "Untitled"
-        return String(line.prefix(60))
-    }
-
-    /// Saves the editor into its scratchpad slot, in place. A doc emptied out
-    /// is removed; a new non-empty doc gets a slot at the top.
-    func stashCurrentDraft() {
-        let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if content.isEmpty {
-            if let id = currentDraftID {
-                drafts.removeAll { $0.id == id }
-                currentDraftID = nil
-                persistDraftLibrary()
-            }
-            return
-        }
-        let draft = Draft(
-            id: currentDraftID ?? UUID().uuidString,
-            title: currentFileURL?.deletingPathExtension().lastPathComponent
-                ?? draftTitle(for: pages),
-            pages: pages,
-            pageIndex: currentPageIndex,
-            filePath: currentFileURL?.path,
-            updated: Date())
-        if let idx = drafts.firstIndex(where: { $0.id == draft.id }) {
-            drafts[idx] = draft
-        } else {
-            drafts.insert(draft, at: 0)
-            if drafts.count > 50 { drafts = Array(drafts.prefix(50)) }
-        }
-        currentDraftID = draft.id
-        persistDraftLibrary()
-    }
-
-    /// Saves the current doc into its slot, then switches to another.
-    func openDraft(_ draft: Draft) {
-        guard draft.id != currentDraftID else { return }
-        stashCurrentDraft()
-        pages = draft.pages
-        currentPageIndex = min(draft.pageIndex, draft.pages.count - 1)
-        if let path = draft.filePath, FileManager.default.fileExists(atPath: path) {
-            currentFileURL = URL(fileURLWithPath: path)
-        } else {
-            currentFileURL = nil
-        }
-        savedPages = pages
-        currentDraftID = draft.id
-        ScriptQueue.shared.activePath = nil
-    }
-
-    func deleteDraft(_ id: String) {
-        drafts.removeAll { $0.id == id }
-        if currentDraftID == id { currentDraftID = nil }
-        persistDraftLibrary()
-    }
-
-    /// Replaces the editor content for a queue/new-page style switch: stash
-    /// first, no dialogs.
-    func replaceEditor(pages newPages: [String], fileURL: URL?) {
-        stashCurrentDraft()
-        pages = newPages
-        currentPageIndex = 0
-        currentFileURL = fileURL
-        savedPages = newPages
-        currentDraftID = nil
-    }
-
     // MARK: - Draft Autosave
 
     // Pages only ever lived in memory, so quitting without an explicit save to
@@ -314,7 +206,21 @@ class TextreamService: NSObject, ObservableObject {
         defaults.set(pages, forKey: DraftKey.pages)
         defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
-        if currentDraftID != nil { stashCurrentDraft() }
+    }
+
+    /// One-time: older builds kept a separate draft library. Fold any of its
+    /// pages that are not already present into the page list, then delete it.
+    private func migrateOldLibraryIntoPages() {
+        struct OldDraft: Codable { var pages: [String] }
+        let key = "draftLibrary"
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let docs = try? JSONDecoder().decode([OldDraft].self, from: data) else { return }
+        for doc in docs {
+            for page in doc.pages where !page.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if !pages.contains(page) { pages.append(page) }
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     /// Returns true when a draft was restored, so the caller does not seed the
@@ -322,7 +228,6 @@ class TextreamService: NSObject, ObservableObject {
     @discardableResult
     func restoreDraft() -> Bool {
         defer { draftRestored = true }
-        loadDraftLibrary()
         let defaults = UserDefaults.standard
         guard let stored = defaults.stringArray(forKey: DraftKey.pages),
               !stored.isEmpty,
@@ -331,11 +236,7 @@ class TextreamService: NSObject, ObservableObject {
 
         pages = stored
         currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
-        if let match = drafts.first(where: { $0.pages == pages }) {
-            currentDraftID = match.id
-        } else {
-            stashCurrentDraft()   // give the restored doc a visible slot
-        }
+        migrateOldLibraryIntoPages()
 
         // Reattach to the file it came from, so Save still targets it and the
         // unsaved-changes dot stays accurate.

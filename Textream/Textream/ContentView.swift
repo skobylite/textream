@@ -571,9 +571,9 @@ Happy presenting! [wave]
                     }
                     .buttonStyle(.plain)
 
-                    if let active = ScriptQueue.shared.activePath {
+                    if ScriptQueue.shared.origins[service.currentPageText] != nil {
                         Button {
-                            ScriptQueue.shared.markDone(active)
+                            markPageDone(at: service.currentPageIndex)
                         } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: "checkmark.circle")
@@ -588,7 +588,7 @@ Happy presenting! [wave]
                             .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
-                        .help("Adds the 'done' tag to this note in your vault and removes it from the queue")
+                        .help("Adds the 'done' tag to this note in your vault and removes it here")
                     }
 
                     Button {
@@ -647,9 +647,15 @@ Happy presenting! [wave]
         .onChange(of: service.currentPageText, initial: true) { _, text in
             scheduleLanguageDetection(for: text)
         }
-        .onChange(of: service.currentPageIndex) { _, _ in
+        .onChange(of: service.currentPageIndex) { old, new in
             if isRecording {
                 stopRecording()
+            }
+            // Empty scripts clean themselves up when you move off them.
+            if old != new, old < service.pages.count, service.pages.count > 1,
+               service.pages[old].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                service.pages.remove(at: old)
+                if service.currentPageIndex > old { service.currentPageIndex -= 1 }
             }
             ignoredLanguageIdentifier = nil
             scheduleLanguageDetection(for: service.currentPageText)
@@ -734,6 +740,11 @@ Happy presenting! [wave]
                 }
                 .tag(index)
                 .contextMenu {
+                    Button {
+                        markPageDone(at: index)
+                    } label: {
+                        Label("Mark Done", systemImage: "checkmark.circle")
+                    }
                     if service.pages.count > 1 {
                         Button(role: .destructive) {
                             removePage(at: index)
@@ -743,8 +754,6 @@ Happy presenting! [wave]
                     }
                 }
             }
-
-            ScratchpadSection()
 
             ScriptQueueSection()
         }
@@ -776,6 +785,22 @@ Happy presenting! [wave]
     }
 
     // MARK: - Actions
+
+    /// Done = recorded: tag the vault note when this page came from the vault,
+    /// then drop the page from the scratchpad.
+    private func markPageDone(at index: Int) {
+        guard index < service.pages.count else { return }
+        let text = service.pages[index]
+        if let path = ScriptQueue.shared.origins[text] {
+            ScriptQueue.shared.markDone(path)
+            ScriptQueue.shared.origins.removeValue(forKey: text)
+        }
+        if service.pages.count > 1 {
+            removePage(at: index)
+        } else {
+            service.pages[0] = ""
+        }
+    }
 
     private func removePage(at index: Int) {
         guard service.pages.count > 1 else { return }
@@ -1028,44 +1053,6 @@ private struct RemoteQRPanel: View {
         guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
         return NSImage(cgImage: cgImage,
                        size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
-    }
-}
-
-
-// MARK: - Scratchpad
-
-/// Every script written in Textream, flat in the sidebar. The open one is
-/// highlighted; clicking another saves the current one and switches.
-private struct ScratchpadSection: View {
-    @ObservedObject private var service = TextreamService.shared
-
-    var body: some View {
-        if !service.drafts.isEmpty {
-            Section("Scratchpad") {
-                ForEach(service.drafts) { draft in
-                    Button {
-                        service.openDraft(draft)
-                    } label: {
-                        Text(draft.title)
-                            .font(.system(size: 11, weight: .medium))
-                            .lineLimit(1)
-                            .foregroundStyle(service.currentDraftID == draft.id ? .primary : .secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .listRowBackground(service.currentDraftID == draft.id
-                        ? Color.accentColor.opacity(0.15) : nil)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            service.deleteDraft(draft.id)
-                        } label: {
-                            Label("Delete Script", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

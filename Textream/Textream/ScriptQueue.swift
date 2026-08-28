@@ -134,6 +134,9 @@ class ScriptQueue {
 
     // MARK: - Load into editor
 
+    /// Page text -> vault note path, for scripts loaded from the vault.
+    var origins: [String: String] = [:]
+
     func load(_ item: QueueItem) {
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return }
         defer { vault.stopAccessingSecurityScopedResource() }
@@ -141,15 +144,25 @@ class ScriptQueue {
             lastError = "Could not read \(item.title)"
             return
         }
+        // One vault note = one script = one page. Horizontal rules stay inline.
         let body = Self.stripFrontmatter(text)
-        // Pages split on horizontal rules; fall back to the whole body.
-        let pages = body
             .components(separatedBy: "\n---\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        // The current editor is stashed in the draft library, so no dialog.
-        TextreamService.shared.replaceEditor(
-            pages: pages.isEmpty ? [body] : pages, fileURL: nil)
+            .joined(separator: "\n\n")
+        let service = TextreamService.shared
+        if let idx = service.pages.firstIndex(of: body) {
+            service.currentPageIndex = idx        // already in the scratchpad
+        } else {
+            if service.pages.count == 1,
+               service.pages[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                service.pages[0] = body           // fill the empty scratchpad
+            } else {
+                service.pages.append(body)
+            }
+            service.currentPageIndex = service.pages.count - 1
+        }
+        origins[body] = item.id
         activePath = item.id
     }
 
