@@ -596,6 +596,17 @@ Happy presenting! [wave]
         .sheet(isPresented: $showAbout) {
             AboutView()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .newPage)) { _ in
+            guard !isRunning else { return }
+            if isRecording {
+                stopRecording()
+            }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                service.pages.append("")
+                service.currentPageIndex = service.pages.count - 1
+            }
+            isTextFocused = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .startPrompter)) { _ in
             // ⌘↩ from the editor. The main window hides while the prompter runs,
             // so this only ever starts; Esc stops from the overlay.
