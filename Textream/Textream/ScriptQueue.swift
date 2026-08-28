@@ -152,15 +152,21 @@ class ScriptQueue {
             .joined(separator: "\n\n")
         let service = TextreamService.shared
         if let idx = service.pages.firstIndex(of: body) {
-            service.currentPageIndex = idx        // already in the scratchpad
+            service.currentPageIndex = idx        // already open
         } else {
-            if service.pages.count == 1,
-               service.pages[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                service.pages[0] = body           // fill the empty scratchpad
+            let cur = service.currentPageIndex
+            let curText = cur < service.pages.count ? service.pages[cur] : ""
+            if origins[curText] != nil {
+                // Browsing: the current page is an unedited vault script, so
+                // the next one replaces it instead of piling up.
+                origins.removeValue(forKey: curText)
+                service.pages[cur] = body
+            } else if curText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                service.pages[cur] = body          // fill the empty page
             } else {
-                service.pages.append(body)
+                service.pages.append(body)         // user's own script stays put
+                service.currentPageIndex = service.pages.count - 1
             }
-            service.currentPageIndex = service.pages.count - 1
         }
         origins[body] = item.id
         activePath = item.id
