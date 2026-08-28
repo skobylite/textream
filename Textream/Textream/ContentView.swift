@@ -744,7 +744,7 @@ Happy presenting! [wave]
                 }
             }
 
-            DraftLibrarySection()
+            BackSection()
 
             ScriptQueueSection()
         }
@@ -1027,6 +1027,37 @@ private struct RemoteQRPanel: View {
         guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
         return NSImage(cgImage: cgImage,
                        size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
+    }
+}
+
+
+// MARK: - Back
+
+/// One-click return to the previous editor content. Switching scripts stashes
+/// the outgoing state; Back restores it (and stashes the current one, so Back
+/// again toggles).
+private struct BackSection: View {
+    @ObservedObject private var service = TextreamService.shared
+
+    var body: some View {
+        if let prev = service.drafts.first {
+            Button {
+                service.goBack()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Back: \(prev.title)")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Return to the previous script")
+        }
     }
 }
 

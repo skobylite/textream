@@ -200,7 +200,13 @@ class TextreamService: NSObject, ObservableObject {
     func loadDraftLibrary() {
         if let data = UserDefaults.standard.data(forKey: Self.libraryKey),
            let list = try? JSONDecoder().decode([Draft].self, from: data) {
-            drafts = list
+            var seen = Set<[String]>()
+            drafts = list.filter { d in
+                let content = d.pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                guard !content.isEmpty, !seen.contains(d.pages) else { return false }
+                seen.insert(d.pages)
+                return true
+            }
         }
     }
 
@@ -221,6 +227,8 @@ class TextreamService: NSObject, ObservableObject {
     func stashCurrentDraft() {
         let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !content.isEmpty else { return }
+        // Navigating between two scripts must not pile up copies.
+        if let top = drafts.first, top.pages == pages { return }
         let draft = Draft(
             id: currentDraftID ?? UUID().uuidString,
             title: currentFileURL?.deletingPathExtension().lastPathComponent
@@ -249,6 +257,25 @@ class TextreamService: NSObject, ObservableObject {
         savedPages = pages
         currentDraftID = draft.id
         ScriptQueue.shared.activePath = nil
+    }
+
+    /// Restores the previous editor state. The current state is stashed first,
+    /// so pressing Back again returns — it toggles between the two most recent.
+    func goBack() {
+        guard let prev = drafts.first else { return }
+        drafts.removeFirst()
+        stashCurrentDraft()
+        pages = prev.pages
+        currentPageIndex = min(prev.pageIndex, prev.pages.count - 1)
+        if let path = prev.filePath, FileManager.default.fileExists(atPath: path) {
+            currentFileURL = URL(fileURLWithPath: path)
+        } else {
+            currentFileURL = nil
+        }
+        savedPages = pages
+        currentDraftID = prev.id
+        ScriptQueue.shared.activePath = nil
+        persistDraftLibrary()
     }
 
     func deleteDraft(_ id: String) {
