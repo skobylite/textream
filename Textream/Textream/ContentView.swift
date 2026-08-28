@@ -771,6 +771,7 @@ Happy presenting! [wave]
                 }
                 .buttonStyle(.plain)
             }
+            .background(.regularMaterial)
         }
     }
 

@@ -259,12 +259,24 @@ class TextreamService: NSObject, ObservableObject {
         ScriptQueue.shared.activePath = nil
     }
 
-    /// Restores the previous editor state. The current state is stashed first,
-    /// so pressing Back again returns — it toggles between the two most recent.
+    /// Restores the previous editor state. The current state moves to the end
+    /// of the stack, so repeated presses cycle through every kept script.
     func goBack() {
-        guard let prev = drafts.first else { return }
+        // Skip stack entries identical to what is already on screen.
+        while let top = drafts.first, top.pages == pages {
+            drafts.removeFirst()
+        }
+        guard let prev = drafts.first else { persistDraftLibrary(); return }
         drafts.removeFirst()
-        stashCurrentDraft()
+        let content = pages.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !content.isEmpty, prev.pages != pages, !drafts.contains(where: { $0.pages == pages }) {
+            drafts.append(Draft(
+                id: currentDraftID ?? UUID().uuidString,
+                title: currentFileURL?.deletingPathExtension().lastPathComponent
+                    ?? draftTitle(for: pages),
+                pages: pages, pageIndex: currentPageIndex,
+                filePath: currentFileURL?.path, updated: Date()))
+        }
         pages = prev.pages
         currentPageIndex = min(prev.pageIndex, prev.pages.count - 1)
         if let path = prev.filePath, FileManager.default.fileExists(atPath: path) {
@@ -324,7 +336,6 @@ class TextreamService: NSObject, ObservableObject {
         defaults.set(pages, forKey: DraftKey.pages)
         defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
-        if currentDraftID != nil { stashCurrentDraft() }
     }
 
     /// Returns true when a draft was restored, so the caller does not seed the
@@ -341,6 +352,7 @@ class TextreamService: NSObject, ObservableObject {
 
         pages = stored
         currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
+        if drafts.first?.pages == pages { drafts.removeFirst(); persistDraftLibrary() }
 
         // Reattach to the file it came from, so Save still targets it and the
         // unsaved-changes dot stays accurate.
