@@ -21,8 +21,12 @@ class TextreamService: NSObject, ObservableObject {
     var launchedExternally = false
     @Published var directorIsReading = false
 
-    @Published var pages: [String] = [""]
-    @Published var currentPageIndex: Int = 0
+    @Published var pages: [String] = [""] {
+        didSet { scheduleDraftSave() }
+    }
+    @Published var currentPageIndex: Int = 0 {
+        didSet { scheduleDraftSave() }
+    }
     @Published var readPages: Set<Int> = []
 
     var hasNextPage: Bool {
@@ -172,6 +176,65 @@ class TextreamService: NSObject, ObservableObject {
 
     @Published var currentFileURL: URL?
     @Published var savedPages: [String] = [""]
+
+    // MARK: - Draft Autosave
+
+    // Pages only ever lived in memory, so quitting without an explicit save to
+    // a .textream file lost the work outright. Mirror them to UserDefaults so
+    // the editor comes back as it was left.
+    private enum DraftKey {
+        static let pages = "draftPages"
+        static let pageIndex = "draftPageIndex"
+        static let fileURL = "draftFileURL"
+    }
+
+    private var draftSaveWork: DispatchWorkItem?
+    private var draftRestored = false
+
+    private func scheduleDraftSave() {
+        guard draftRestored else { return }
+        draftSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveDraft() }
+        draftSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Writes immediately. Called on quit and on hide, where a debounce would lose the tail.
+    func saveDraft() {
+        draftSaveWork?.cancel()
+        let defaults = UserDefaults.standard
+        defaults.set(pages, forKey: DraftKey.pages)
+        defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
+        defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
+    }
+
+    /// Returns true when a draft was restored, so the caller does not seed the
+    /// sample script over the top of it.
+    @discardableResult
+    func restoreDraft() -> Bool {
+        defer { draftRestored = true }
+        let defaults = UserDefaults.standard
+        guard let stored = defaults.stringArray(forKey: DraftKey.pages),
+              !stored.isEmpty,
+              stored.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        else { return false }
+
+        pages = stored
+        currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
+
+        // Reattach to the file it came from, so Save still targets it and the
+        // unsaved-changes dot stays accurate.
+        if let path = defaults.string(forKey: DraftKey.fileURL) {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path),
+               let data = try? Data(contentsOf: url),
+               let onDisk = try? JSONDecoder().decode([String].self, from: data) {
+                currentFileURL = url
+                savedPages = onDisk
+            }
+        }
+        return true
+    }
 
     // MARK: - File Operations
 

@@ -21,6 +21,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         category: "AppLifecycle"
     )
 
+    func applicationWillTerminate(_ notification: Notification) {
+        TextreamService.shared.saveDraft()
+    }
+
+    func applicationWillResignActive(_ notification: Notification) {
+        TextreamService.shared.saveDraft()
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         let launchedByURL: Bool
