@@ -134,8 +134,11 @@ class ScriptQueue {
 
     // MARK: - Load into editor
 
-    /// Page text -> vault note path, for scripts loaded from the vault.
-    var origins: [String: String] = [:]
+    /// Page index -> vault note path, for pages that are live views of a note.
+    var pageOrigins: [Int: String] = [:]
+    /// Last body written/read per path, to skip no-op writes.
+    private var lastSynced: [String: String] = [:]
+    private var syncWork: DispatchWorkItem?
 
     func load(_ item: QueueItem) {
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return }
@@ -144,32 +147,77 @@ class ScriptQueue {
             lastError = "Could not read \(item.title)"
             return
         }
-        // One vault note = one script = one page. Horizontal rules stay inline.
+        // Verbatim body (frontmatter stripped) so edits round-trip to the file.
         let body = Self.stripFrontmatter(text)
-            .components(separatedBy: "\n---\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
         let service = TextreamService.shared
-        if let idx = service.pages.firstIndex(of: body) {
+        if let (idx, _) = pageOrigins.first(where: { $0.value == item.id }) {
             service.currentPageIndex = idx        // already open
+            return
+        }
+        let cur = service.currentPageIndex
+        let curText = cur < service.pages.count ? service.pages[cur] : ""
+        if pageOrigins[cur] != nil {
+            // Browsing: vault pages are views, so the next one swaps in place.
+            // Any edits were already synced to the previous file.
+            pageOrigins[cur] = item.id
+            service.pages[cur] = body
+        } else if curText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pageOrigins[cur] = item.id
+            service.pages[cur] = body
         } else {
-            let cur = service.currentPageIndex
-            let curText = cur < service.pages.count ? service.pages[cur] : ""
-            if origins[curText] != nil {
-                // Browsing: the current page is an unedited vault script, so
-                // the next one replaces it instead of piling up.
-                origins.removeValue(forKey: curText)
-                service.pages[cur] = body
-            } else if curText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                service.pages[cur] = body          // fill the empty page
+            service.pages.append(body)
+            service.currentPageIndex = service.pages.count - 1
+            pageOrigins[service.pages.count - 1] = item.id
+        }
+        lastSynced[item.id] = body
+        activePath = item.id
+    }
+
+    /// Keep index->path mappings valid when a page is removed.
+    func pageRemoved(at index: Int) {
+        var updated: [Int: String] = [:]
+        for (i, path) in pageOrigins {
+            if i == index { continue }
+            updated[i > index ? i - 1 : i] = path
+        }
+        pageOrigins = updated
+    }
+
+    /// Debounced write-back: edits to a vault-backed page rewrite the note's
+    /// body in place, preserving its frontmatter.
+    func scheduleSync() {
+        syncWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.syncEdits() }
+        syncWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    func syncEdits() {
+        syncWork?.cancel()
+        guard let vault = vaultURL, !pageOrigins.isEmpty else { return }
+        let pages = TextreamService.shared.pages
+        guard vault.startAccessingSecurityScopedResource() else { return }
+        defer { vault.stopAccessingSecurityScopedResource() }
+        for (idx, path) in pageOrigins {
+            guard idx < pages.count else { continue }
+            let body = pages[idx]
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  body != lastSynced[path] else { continue }
+            let url = URL(fileURLWithPath: path)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let out: String
+            if let fmRange = text.range(of: #"(?s)\A---\n.*?\n---\n?"#, options: .regularExpression) {
+                out = String(text[fmRange]) + body + "\n"
             } else {
-                service.pages.append(body)         // user's own script stays put
-                service.currentPageIndex = service.pages.count - 1
+                out = body + "\n"
+            }
+            do {
+                try out.write(to: url, atomically: true, encoding: .utf8)
+                lastSynced[path] = body
+            } catch {
+                lastError = "Could not write \(url.lastPathComponent): \(error.localizedDescription)"
             }
         }
-        origins[body] = item.id
-        activePath = item.id
     }
 
     // MARK: - Done

@@ -206,6 +206,7 @@ class TextreamService: NSObject, ObservableObject {
         defaults.set(pages, forKey: DraftKey.pages)
         defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
+        ScriptQueue.shared.scheduleSync()
     }
 
     /// One-time: older builds kept a separate draft library. Fold any of its

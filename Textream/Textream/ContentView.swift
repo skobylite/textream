@@ -571,7 +571,7 @@ Happy presenting! [wave]
                     }
                     .buttonStyle(.plain)
 
-                    if ScriptQueue.shared.origins[service.currentPageText] != nil {
+                    if ScriptQueue.shared.pageOrigins[service.currentPageIndex] != nil {
                         Button {
                             markPageDone(at: service.currentPageIndex)
                         } label: {
@@ -654,6 +654,7 @@ Happy presenting! [wave]
             // Empty scripts clean themselves up when you move off them.
             if old != new, old < service.pages.count, service.pages.count > 1,
                service.pages[old].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ScriptQueue.shared.pageRemoved(at: old)
                 service.pages.remove(at: old)
                 if service.currentPageIndex > old { service.currentPageIndex -= 1 }
             }
@@ -790,10 +791,10 @@ Happy presenting! [wave]
     /// then drop the page from the scratchpad.
     private func markPageDone(at index: Int) {
         guard index < service.pages.count else { return }
-        let text = service.pages[index]
-        if let path = ScriptQueue.shared.origins[text] {
+        if let path = ScriptQueue.shared.pageOrigins[index] {
+            ScriptQueue.shared.syncEdits()          // flush pending edits first
             ScriptQueue.shared.markDone(path)
-            ScriptQueue.shared.origins.removeValue(forKey: text)
+            ScriptQueue.shared.pageOrigins.removeValue(forKey: index)
         }
         if service.pages.count > 1 {
             removePage(at: index)
@@ -807,6 +808,7 @@ Happy presenting! [wave]
         if isRecording {
             stopRecording()
         }
+        ScriptQueue.shared.pageRemoved(at: index)
         withAnimation(.easeInOut(duration: 0.2)) {
             service.pages.remove(at: index)
             if service.currentPageIndex >= service.pages.count {
