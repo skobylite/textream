@@ -578,13 +578,17 @@ Happy presenting! [wave]
                             HStack(spacing: 3) {
                                 Image(systemName: "checkmark.circle")
                                     .font(.system(size: 10, weight: .semibold))
-                                Text("Done")
+                                Text("Mark Script Done")
                                     .font(.system(size: 11, weight: .medium))
                             }
                             .foregroundStyle(.green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.green.opacity(0.12))
+                            .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
-                        .help("Tag this script done in the vault")
+                        .help("Adds the 'done' tag to this note in your vault and removes it from the queue")
                     }
 
                     Button {
@@ -739,12 +743,12 @@ Happy presenting! [wave]
                     }
                 }
             }
+
+            ScriptQueueSection()
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
-                ScriptQueuePanel()
-
                 RemoteQRPanel()
 
                 Button {
@@ -1025,16 +1029,46 @@ private struct RemoteQRPanel: View {
 }
 
 
-// MARK: - Script Queue Panel
+// MARK: - Script Queue Section
 
-/// Sidebar list of vault notes tagged `script` and not `done`. Local-only.
-private struct ScriptQueuePanel: View {
+/// Sidebar section listing vault notes tagged `script` and not `done`. Local-only.
+private struct ScriptQueueSection: View {
     @State private var queue = ScriptQueue.shared
     @State private var expanded = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            Divider()
+        Section {
+            if expanded {
+                ForEach(queue.items) { item in
+                    Button {
+                        queue.load(item)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.title)
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                            if !item.status.isEmpty {
+                                Text(item.status)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .foregroundStyle(queue.activePath == item.id ? .primary : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(queue.activePath == item.id
+                        ? Color.accentColor.opacity(0.15) : nil)
+                    .contextMenu {
+                        Button("Mark Done") { queue.markDone(item.id) }
+                    }
+                }
+                if let err = queue.lastError {
+                    Text(err).font(.system(size: 9)).foregroundStyle(.red)
+                }
+            }
+        } header: {
             Button {
                 if queue.vaultURL == nil { queue.pickVault(); return }
                 expanded.toggle()
@@ -1046,7 +1080,7 @@ private struct ScriptQueuePanel: View {
                     Text(queue.vaultURL == nil
                          ? "Choose Script Vault…"
                          : "Scripts (\(queue.items.count))")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                     Spacer()
                     if queue.vaultURL != nil {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
@@ -1054,57 +1088,12 @@ private struct ScriptQueuePanel: View {
                     }
                 }
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .contextMenu {
                 Button("Rescan") { queue.rescan() }
                 Button("Change Vault…") { queue.pickVault() }
-            }
-
-            if expanded {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(queue.items) { item in
-                            Button {
-                                queue.load(item)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(item.title)
-                                        .font(.system(size: 11, weight: .medium))
-                                        .lineLimit(1)
-                                    if !item.status.isEmpty {
-                                        Text(item.status)
-                                            .font(.system(size: 9))
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                }
-                                .foregroundStyle(queue.activePath == item.id ? .primary : .secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 4)
-                                .background(queue.activePath == item.id
-                                    ? Color.accentColor.opacity(0.15) : .clear)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button("Mark Done") { queue.markDone(item.id) }
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 180)
-            }
-
-            if let err = queue.lastError {
-                Text(err)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 4)
             }
         }
     }

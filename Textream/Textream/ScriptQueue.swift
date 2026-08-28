@@ -10,6 +10,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ScanError: Error { let message: String; init(_ m: String) { message = m } }
+
 struct QueueItem: Identifiable {
     let id: String        // file path
     let url: URL
@@ -32,6 +34,7 @@ class ScriptQueue {
 
     init() {
         restoreBookmark()
+        if vaultURL != nil { rescan() }
     }
 
     // MARK: - Vault access
@@ -77,11 +80,26 @@ class ScriptQueue {
 
     // MARK: - Scan
 
+    private(set) var scanning = false
+
     func rescan() {
-        guard let vault = vaultURL else { return }
+        guard let vault = vaultURL, !scanning else { return }
+        scanning = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.scan(vault: vault)
+            DispatchQueue.main.async {
+                self?.scanning = false
+                switch result {
+                case .success(let items): self?.items = items; self?.lastError = nil
+                case .failure(let e): self?.lastError = e.message
+                }
+            }
+        }
+    }
+
+    private static func scan(vault: URL) -> Result<[QueueItem], ScanError> {
         guard vault.startAccessingSecurityScopedResource() else {
-            lastError = "Vault access denied — pick the folder again."
-            return
+            return .failure(ScanError("Vault access denied — pick the folder again."))
         }
         defer { vault.stopAccessingSecurityScopedResource() }
 
@@ -109,15 +127,15 @@ class ScriptQueue {
             if s == "Scheduled" { return 3 }
             return 2
         }
-        items = found.sorted {
+        return .success(found.sorted {
             (rank($0.status), $0.title) < (rank($1.status), $1.title)
-        }
-        lastError = nil
+        })
     }
 
     // MARK: - Load into editor
 
     func load(_ item: QueueItem) {
+        guard TextreamService.shared.confirmDiscardIfNeeded() else { return }
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return }
         defer { vault.stopAccessingSecurityScopedResource() }
         guard let text = try? String(contentsOf: item.url, encoding: .utf8) else {
