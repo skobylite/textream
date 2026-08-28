@@ -134,39 +134,56 @@ class ScriptQueue {
 
     // MARK: - Load into editor
 
-    /// Page index -> vault note path, for pages that are live views of a note.
-    var pageOrigins: [Int: String] = [:]
-    /// Last body written/read per path, to skip no-op writes.
-    private var lastSynced: [String: String] = [:]
+
+    // MARK: - The vault slot
+    //
+    // Exactly one page can be a live view of a vault note. Browsing the queue
+    // swaps that one slot; everything else in the page list is the user's own.
+    // One slot means one (index, path) pair to keep honest — the previous
+    // index-map design corrupted itself when indices drifted, mapping vault
+    // paths onto unrelated pages.
+
+    private static let slotKey = "vaultSlot"   // persisted as [path, body]
+
+    private(set) var slotIndex: Int?
+    private(set) var slotPath: String?
+    private var slotSyncedBody: String?
     private var syncWork: DispatchWorkItem?
 
-    private static let originsKey = "vaultPageOrigins"
+    var pageOrigins: [Int: String] {   // kept for the view layer's checks
+        guard let i = slotIndex, let p = slotPath else { return [:] }
+        return [i: p]
+    }
 
-    /// Origins survive relaunch as [path: body]; indices are rebuilt against
-    /// the restored pages, so page order changes cannot corrupt the mapping.
-    func persistOrigins() {
+    private func persistSlot() {
         let pages = TextreamService.shared.pages
-        var map: [String: String] = [:]
-        for (idx, path) in pageOrigins where idx < pages.count {
-            map[path] = pages[idx]
+        if let i = slotIndex, let p = slotPath, i < pages.count {
+            UserDefaults.standard.set([p, pages[i]], forKey: Self.slotKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.slotKey)
         }
-        UserDefaults.standard.set(map, forKey: Self.originsKey)
     }
 
     func restoreOrigins() {
-        guard let map = UserDefaults.standard.dictionary(forKey: Self.originsKey) as? [String: String] else { return }
-        let pages = TextreamService.shared.pages
-        for (path, body) in map {
-            if let idx = pages.firstIndex(of: body) {
-                pageOrigins[idx] = path
-                lastSynced[path] = body
-            }
+        guard let saved = UserDefaults.standard.stringArray(forKey: Self.slotKey),
+              saved.count == 2 else { return }
+        let (path, body) = (saved[0], saved[1])
+        // Reattach only on an exact content match; anything else is stale and
+        // the page simply stays as ordinary user content.
+        if let idx = TextreamService.shared.pages.firstIndex(of: body),
+           FileManager.default.fileExists(atPath: path) {
+            slotIndex = idx
+            slotPath = path
+            slotSyncedBody = body
+            activePath = path
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.slotKey)
         }
     }
 
     func clearOrigin(at index: Int) {
-        pageOrigins.removeValue(forKey: index)
-        persistOrigins()
+        if slotIndex == index { slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil }
+        persistSlot()
     }
 
     func load(_ item: QueueItem) {
@@ -176,56 +193,49 @@ class ScriptQueue {
             lastError = "Could not read \(item.title)"
             return
         }
-        // Verbatim body (frontmatter stripped) so edits round-trip to the file.
         let body = Self.stripFrontmatter(text)
         let service = TextreamService.shared
-        if let (idx, _) = pageOrigins.first(where: { $0.value == item.id }) {
+
+        if slotPath == item.id, let idx = slotIndex, idx < service.pages.count {
             service.currentPageIndex = idx        // already open
             return
         }
-        if let idx = service.pages.firstIndex(of: body) {
-            // Same content already loaded (e.g. before a relaunch lost the
-            // mapping): reattach instead of appending a duplicate.
-            pageOrigins[idx] = item.id
-            lastSynced[item.id] = body
+        syncEdits()                                // flush the outgoing script
+
+        if let idx = slotIndex, idx < service.pages.count {
+            service.pages[idx] = body              // swap the existing slot
             service.currentPageIndex = idx
-            activePath = item.id
-            persistOrigins()
-            return
-        }
-        let cur = service.currentPageIndex
-        let curText = cur < service.pages.count ? service.pages[cur] : ""
-        if pageOrigins[cur] != nil {
-            // Browsing: vault pages are views, so the next one swaps in place.
-            // Any edits were already synced to the previous file.
-            pageOrigins[cur] = item.id
-            service.pages[cur] = body
-        } else if curText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            pageOrigins[cur] = item.id
-            service.pages[cur] = body
+            slotIndex = idx
         } else {
-            service.pages.append(body)
-            service.currentPageIndex = service.pages.count - 1
-            pageOrigins[service.pages.count - 1] = item.id
+            let cur = service.currentPageIndex
+            let curText = cur < service.pages.count ? service.pages[cur] : ""
+            if curText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                service.pages[cur] = body
+                slotIndex = cur
+            } else {
+                service.pages.append(body)
+                service.currentPageIndex = service.pages.count - 1
+                slotIndex = service.pages.count - 1
+            }
         }
-        lastSynced[item.id] = body
+        slotPath = item.id
+        slotSyncedBody = body
         activePath = item.id
-        persistOrigins()
+        persistSlot()
     }
 
-    /// Keep index->path mappings valid when a page is removed.
+    /// Keep the slot index valid when a page is removed.
     func pageRemoved(at index: Int) {
-        var updated: [Int: String] = [:]
-        for (i, path) in pageOrigins {
-            if i == index { continue }
-            updated[i > index ? i - 1 : i] = path
+        guard let i = slotIndex else { return }
+        if i == index {
+            slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil
+        } else if i > index {
+            slotIndex = i - 1
         }
-        pageOrigins = updated
-        persistOrigins()
+        persistSlot()
     }
 
-    /// Debounced write-back: edits to a vault-backed page rewrite the note's
-    /// body in place, preserving its frontmatter.
+    /// Debounced write-back of slot edits into the note body.
     func scheduleSync() {
         syncWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.syncEdits() }
@@ -235,29 +245,28 @@ class ScriptQueue {
 
     func syncEdits() {
         syncWork?.cancel()
-        guard let vault = vaultURL, !pageOrigins.isEmpty else { return }
+        guard let vault = vaultURL, let idx = slotIndex, let path = slotPath else { return }
         let pages = TextreamService.shared.pages
+        guard idx < pages.count else { return }
+        let body = pages[idx]
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              body != slotSyncedBody else { return }
         guard vault.startAccessingSecurityScopedResource() else { return }
         defer { vault.stopAccessingSecurityScopedResource() }
-        for (idx, path) in pageOrigins {
-            guard idx < pages.count else { continue }
-            let body = pages[idx]
-            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  body != lastSynced[path] else { continue }
-            let url = URL(fileURLWithPath: path)
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let out: String
-            if let fmRange = text.range(of: #"(?s)\A---\n.*?\n---\n?"#, options: .regularExpression) {
-                out = String(text[fmRange]) + body + "\n"
-            } else {
-                out = body + "\n"
-            }
-            do {
-                try out.write(to: url, atomically: true, encoding: .utf8)
-                lastSynced[path] = body
-            } catch {
-                lastError = "Could not write \(url.lastPathComponent): \(error.localizedDescription)"
-            }
+        let url = URL(fileURLWithPath: path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let out: String
+        if let fmRange = text.range(of: #"(?s)\A---\n.*?\n---\n?"#, options: .regularExpression) {
+            out = String(text[fmRange]) + body + "\n"
+        } else {
+            out = body + "\n"
+        }
+        do {
+            try out.write(to: url, atomically: true, encoding: .utf8)
+            slotSyncedBody = body
+            persistSlot()
+        } catch {
+            lastError = "Could not write \(url.lastPathComponent): \(error.localizedDescription)"
         }
     }
 
