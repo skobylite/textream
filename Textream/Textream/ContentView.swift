@@ -571,6 +571,22 @@ Happy presenting! [wave]
                     }
                     .buttonStyle(.plain)
 
+                    if let active = ScriptQueue.shared.activePath {
+                        Button {
+                            ScriptQueue.shared.markDone(active)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Done")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(.green)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Tag this script done in the vault")
+                    }
+
                     Button {
                         showSettings = true
                     } label: {
@@ -727,6 +743,8 @@ Happy presenting! [wave]
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                ScriptQueuePanel()
+
                 RemoteQRPanel()
 
                 Button {
@@ -1003,5 +1021,91 @@ private struct RemoteQRPanel: View {
         guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
         return NSImage(cgImage: cgImage,
                        size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
+    }
+}
+
+
+// MARK: - Script Queue Panel
+
+/// Sidebar list of vault notes tagged `script` and not `done`. Local-only.
+private struct ScriptQueuePanel: View {
+    @State private var queue = ScriptQueue.shared
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Button {
+                if queue.vaultURL == nil { queue.pickVault(); return }
+                expanded.toggle()
+                if expanded { queue.rescan() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "tray.full")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(queue.vaultURL == nil
+                         ? "Choose Script Vault…"
+                         : "Scripts (\(queue.items.count))")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if queue.vaultURL != nil {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button("Rescan") { queue.rescan() }
+                Button("Change Vault…") { queue.pickVault() }
+            }
+
+            if expanded {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(queue.items) { item in
+                            Button {
+                                queue.load(item)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(item.title)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1)
+                                    if !item.status.isEmpty {
+                                        Text(item.status)
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .foregroundStyle(queue.activePath == item.id ? .primary : .secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 4)
+                                .background(queue.activePath == item.id
+                                    ? Color.accentColor.opacity(0.15) : .clear)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button("Mark Done") { queue.markDone(item.id) }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+            }
+
+            if let err = queue.lastError {
+                Text(err)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
+            }
+        }
     }
 }
