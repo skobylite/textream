@@ -344,15 +344,6 @@ class ScriptQueue {
         return result
     }
 
-    /// Show only scripts with completion % >= 90.
-    var highCompletionOnly: Bool = UserDefaults.standard.bool(forKey: "queueHighCompletionOnly") {
-        didSet { UserDefaults.standard.set(highCompletionOnly, forKey: "queueHighCompletionOnly") }
-    }
-
-    var visibleItems: [QueueItem] {
-        highCompletionOnly ? items.filter { ($0.completion ?? 0) >= 90 } : items
-    }
-
     static func completion(in fm: String) -> Int? {
         guard let m = fm.range(of: #"(?mi)^completion %:\s*(\d+)"#, options: .regularExpression) else { return nil }
         return Int(String(fm[m]).components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "")

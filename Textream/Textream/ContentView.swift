@@ -1069,7 +1069,7 @@ private struct ScriptQueueSection: View {
     var body: some View {
         Section {
             if true {
-                ForEach(queue.visibleItems) { item in
+                ForEach(queue.items) { item in
                     Button {
                         queue.load(item)
                     } label: {
@@ -1110,7 +1110,7 @@ private struct ScriptQueueSection: View {
                         .font(.system(size: 10, weight: .semibold))
                     Text(queue.vaultURL == nil
                          ? "Choose Script Vault…"
-                         : "Scripts (\(queue.visibleItems.count))")
+                         : "Scripts (\(queue.items.count))")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(.secondary)
@@ -1118,10 +1118,6 @@ private struct ScriptQueueSection: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
-                Toggle("Only 90%+ complete", isOn: Binding(
-                    get: { queue.highCompletionOnly },
-                    set: { queue.highCompletionOnly = $0 }))
-                Divider()
                 Button("Rescan") { queue.rescan() }
                 Button("Change Vault…") { queue.pickVault() }
             }
