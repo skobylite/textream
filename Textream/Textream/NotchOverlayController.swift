@@ -312,7 +312,7 @@ class NotchOverlayController: NSObject {
             rootView: MirroredOverlay(showsControl: false) { floatingView }
         )
 
-        let panel = PrompterPanel(
+        let panel = NSPanel(
             contentRect: initialFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -381,12 +381,10 @@ class NotchOverlayController: NSObject {
             baseHeight: panelHeight
         )
         let contentView = NSHostingView(
-            rootView: MirroredOverlay(showsControl: true) {
-                floatingView.background(WindowDragHandle())
-            }
+            rootView: MirroredOverlay(showsControl: true) { floatingView }
         )
 
-        let panel = PrompterPanel(
+        let panel = NSPanel(
             contentRect: NSRect(x: xPosition, y: yPosition, width: panelWidth, height: panelHeight),
             styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
@@ -1785,21 +1783,4 @@ struct MirroredOverlay<Content: View>: View {
             }
         }
     }
-}
-
-// MARK: - Window drag handle
-
-/// Since 1.7.1 the prompter panel can become key, and the hosting view then
-/// swallows mouse-downs that used to fall through to the window background,
-/// so isMovableByWindowBackground stopped dragging the floating window.
-/// This sits behind the content and hands any bare mouse-down to the window.
-struct WindowDragHandle: NSViewRepresentable {
-    final class DragView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
-        override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
-        }
-    }
-    func makeNSView(context: Context) -> DragView { DragView() }
-    func updateNSView(_ nsView: DragView, context: Context) {}
 }
