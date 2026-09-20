@@ -382,6 +382,7 @@ class NotchOverlayController: NSObject {
         )
         let contentView = NSHostingView(
             rootView: MirroredOverlay(showsControl: true) { floatingView }
+                .overlay(alignment: .top) { FloatingDragBar() }
         )
 
         let panel = NSPanel(
@@ -1783,4 +1784,40 @@ struct MirroredOverlay<Content: View>: View {
             }
         }
     }
+}
+
+// MARK: - Floating window drag bar
+
+/// Explicit grab bar for the floating window. Background dragging via
+/// isMovableByWindowBackground stopped working for the borderless prompter
+/// panel on macOS 26 (upstream 1.7.0 and 1.7.1 both), so the bar drives
+/// the move itself with performDrag.
+struct FloatingDragBar: View {
+    var body: some View {
+        WindowDragArea()
+            .frame(height: 22)
+            .overlay(
+                Capsule()
+                    .fill(Color.white.opacity(0.28))
+                    .frame(width: 44, height: 5)
+                    .allowsHitTesting(false)
+            )
+            .contentShape(Rectangle())
+            .help("Drag to move the prompter")
+    }
+}
+
+struct WindowDragArea: NSViewRepresentable {
+    final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            bounds.contains(point) ? self : nil
+        }
+    }
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ nsView: DragView, context: Context) {}
 }
