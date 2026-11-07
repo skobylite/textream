@@ -238,8 +238,11 @@ struct ExternalDisplayView: View {
 
     private var prompterView: some View {
         GeometryReader { geo in
-            let fontSize = max(48, min(96, geo.size.width / 14))
+            let settings = NotchSettings.shared
+            let fontSize = max(48, min(96, geo.size.width / 14)) * settings.externalTextScale
+            // Narrower column: extra side margin split evenly on both sides.
             let hPad = max(40, geo.size.width * 0.08)
+                + geo.size.width * (1 - settings.externalColumnWidth) / 2
 
             VStack(spacing: 0) {
                 Spacer().frame(height: 20)

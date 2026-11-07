@@ -1202,6 +1202,22 @@ struct SettingsView: View {
             if settings.externalDisplayMode != .off {
                 Divider()
 
+                Text("Text Size")
+                    .font(.system(size: 13, weight: .medium))
+                Slider(value: $settings.externalTextScale, in: 0.4...1.0, step: 0.05)
+                Text("\(Int(settings.externalTextScale * 100))% of the automatic size.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Text("Column Width")
+                    .font(.system(size: 13, weight: .medium))
+                Slider(value: $settings.externalColumnWidth, in: 0.4...1.0, step: 0.05)
+                Text("\(Int(settings.externalColumnWidth * 100))% of the screen width. Narrower adds side margins and reduces eye movement.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Divider()
+
                 Text("Target Display")
                     .font(.system(size: 13, weight: .medium))
 
@@ -1563,6 +1579,8 @@ struct SettingsView: View {
         settings.fullscreenScreenID = 0
         settings.externalDisplayMode = .off
         settings.externalScreenID = 0
+        settings.externalTextScale = 1.0
+        settings.externalColumnWidth = 1.0
         settings.mirrorAxis = .horizontal
         settings.mirrorOverlay = false
         settings.listeningMode = .wordTracking

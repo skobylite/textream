@@ -405,6 +405,15 @@ class NotchSettings {
         didSet { UserDefaults.standard.set(Int(externalScreenID), forKey: "externalScreenID") }
     }
 
+    /// External display text size, as a fraction of the automatic size (0.4–1.0).
+    var externalTextScale: Double {
+        didSet { UserDefaults.standard.set(externalTextScale, forKey: "externalTextScale") }
+    }
+    /// External display column width, as a fraction of the screen width (0.4–1.0).
+    var externalColumnWidth: Double {
+        didSet { UserDefaults.standard.set(externalColumnWidth, forKey: "externalColumnWidth") }
+    }
+
     var mirrorAxis: MirrorAxis {
         didSet { UserDefaults.standard.set(mirrorAxis.rawValue, forKey: "mirrorAxis") }
     }
@@ -530,6 +539,10 @@ class NotchSettings {
         self.externalDisplayMode = ExternalDisplayMode(rawValue: UserDefaults.standard.string(forKey: "externalDisplayMode") ?? "") ?? .off
         let savedScreenID = UserDefaults.standard.integer(forKey: "externalScreenID")
         self.externalScreenID = UInt32(savedScreenID)
+        let savedScale = UserDefaults.standard.double(forKey: "externalTextScale")
+        self.externalTextScale = savedScale > 0 ? savedScale : 1.0
+        let savedCol = UserDefaults.standard.double(forKey: "externalColumnWidth")
+        self.externalColumnWidth = savedCol > 0 ? savedCol : 1.0
         self.mirrorAxis = MirrorAxis(rawValue: UserDefaults.standard.string(forKey: "mirrorAxis") ?? "") ?? .horizontal
         self.mirrorOverlay = UserDefaults.standard.object(forKey: "mirrorOverlay") as? Bool ?? false
         self.listeningMode = ListeningMode(rawValue: UserDefaults.standard.string(forKey: "listeningMode") ?? "") ?? .wordTracking
