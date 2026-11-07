@@ -1794,8 +1794,10 @@ struct MirroredOverlay<Content: View>: View {
 /// the move itself with performDrag.
 struct FloatingDragBar: View {
     var body: some View {
+        // Centred and narrow, so it never covers the Mirror button at the
+        // top-right corner.
         WindowDragArea()
-            .frame(height: 22)
+            .frame(width: 120, height: 22)
             .overlay(
                 Capsule()
                     .fill(Color.white.opacity(0.28))
@@ -1813,9 +1815,6 @@ struct WindowDragArea: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override func mouseDown(with event: NSEvent) {
             window?.performDrag(with: event)
-        }
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            bounds.contains(point) ? self : nil
         }
     }
     func makeNSView(context: Context) -> DragView { DragView() }

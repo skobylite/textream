@@ -17,7 +17,6 @@ struct QueueItem: Identifiable {
     let url: URL
     let title: String
     let status: String
-    let tags: [String]
     let completion: Int?   // frontmatter "completion %"
 }
 
@@ -119,7 +118,7 @@ class ScriptQueue {
             found.append(QueueItem(
                 id: file.path, url: file,
                 title: file.deletingPathExtension().lastPathComponent,
-                status: Self.status(in: fm), tags: tags,
+                status: Self.status(in: fm),
                 completion: Self.completion(in: fm)))
         }
         // "Ready to record" first, then other statuses, then untagged.
@@ -136,9 +135,6 @@ class ScriptQueue {
         })
     }
 
-    // MARK: - Load into editor
-
-
     // MARK: - The vault slot
     //
     // Exactly one page can be a live view of a vault note. Browsing the queue
@@ -152,6 +148,9 @@ class ScriptQueue {
     private(set) var slotIndex: Int?
     private(set) var slotPath: String?
     private var slotSyncedBody: String?
+    /// Last observed text of the slot page, used to find the page again when
+    /// the page list changes, so the slot can never point at another page.
+    private var slotPageText: String?
     private var syncWork: DispatchWorkItem?
 
     var pageOrigins: [Int: String] {   // kept for the view layer's checks
@@ -179,6 +178,7 @@ class ScriptQueue {
             slotIndex = idx
             slotPath = path
             slotSyncedBody = body
+            slotPageText = body
             activePath = path
         } else {
             UserDefaults.standard.removeObject(forKey: Self.slotKey)
@@ -189,13 +189,59 @@ class ScriptQueue {
     /// the slot's index no longer means anything. Flush, then drop it.
     func resetSlot() {
         syncEdits()
-        slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil
-        persistSlot()
+        dropSlot()
     }
 
     func clearOrigin(at index: Int) {
-        if slotIndex == index { slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil }
+        if slotIndex == index { dropSlot() }
+    }
+
+    private func dropSlot() {
+        slotIndex = nil; slotPath = nil; slotSyncedBody = nil; slotPageText = nil; activePath = nil
         persistSlot()
+    }
+
+    /// Called on every change to the page list. Keeps the slot attached to
+    /// the same page through edits, inserts, removals and reorders, and drops
+    /// it when that page is gone. Without this, any code path that replaced
+    /// the pages without telling the queue left the slot pointing at another
+    /// page, and the next sync wrote that page's text into the vault note.
+    func pagesDidChange(from old: [String], to new: [String]) {
+        guard let i = slotIndex, let tracked = slotPageText else { return }
+        switch Self.followSlot(index: i, tracked: tracked, old: old, new: new) {
+        case .unchanged: break
+        case .edited(let text): slotPageText = text
+        case .moved(let j): slotIndex = j; persistSlot()
+        case .lost: dropSlot()
+        }
+    }
+
+    enum SlotChange: Equatable { case unchanged, edited(String), moved(Int), lost }
+
+    static func followSlot(index i: Int, tracked: String, old: [String], new: [String]) -> SlotChange {
+        if i < new.count, new[i] == tracked { return .unchanged }
+        let onlySlotChanged = old.count == new.count
+            && i < new.count
+            && new.indices.allSatisfy { $0 == i || new[$0] == old[$0] }
+        if onlySlotChanged {
+            return looksLikeEdit(of: tracked, to: new[i]) ? .edited(new[i]) : .lost
+        }
+        if let j = new.firstIndex(of: tracked) { return .moved(j) }
+        return .lost
+    }
+
+    /// Typing, deleting and dictation keep most of the old text at the start
+    /// and end; a replacement (another document loaded into the same page)
+    /// keeps almost none. Detaching on a replacement is the safe failure: the
+    /// text stays in the editor, it just stops syncing to the vault note.
+    static func looksLikeEdit(of old: String, to new: String) -> Bool {
+        let a = Array(old), b = Array(new)
+        var prefix = 0
+        while prefix < a.count, prefix < b.count, a[prefix] == b[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < a.count - prefix, suffix < b.count - prefix,
+              a[a.count - 1 - suffix] == b[b.count - 1 - suffix] { suffix += 1 }
+        return prefix + suffix >= a.count / 2
     }
 
     func load(_ item: QueueItem) {
@@ -232,18 +278,8 @@ class ScriptQueue {
         }
         slotPath = item.id
         slotSyncedBody = body
+        slotPageText = body
         activePath = item.id
-        persistSlot()
-    }
-
-    /// Keep the slot index valid when a page is removed.
-    func pageRemoved(at index: Int) {
-        guard let i = slotIndex else { return }
-        if i == index {
-            slotIndex = nil; slotPath = nil; slotSyncedBody = nil; activePath = nil
-        } else if i > index {
-            slotIndex = i - 1
-        }
         persistSlot()
     }
 
@@ -267,12 +303,9 @@ class ScriptQueue {
         defer { vault.stopAccessingSecurityScopedResource() }
         let url = URL(fileURLWithPath: path)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        let out: String
-        if let fmRange = text.range(of: #"(?s)\A---\n.*?\n---\n?"#, options: .regularExpression) {
-            out = String(text[fmRange]) + body + "\n"
-        } else {
-            out = body + "\n"
-        }
+        // Same split as loading, so the frontmatter that was stripped for
+        // display is exactly the part written back.
+        let out = (Self.splitFrontmatter(text)?.head ?? "") + body + "\n"
         do {
             try out.write(to: url, atomically: true, encoding: .utf8)
             slotSyncedBody = body
@@ -314,12 +347,23 @@ class ScriptQueue {
         return String(text[text.index(text.startIndex, offsetBy: 3)..<end.lowerBound])
     }
 
-    static func stripFrontmatter(_ text: String) -> String {
+    /// Splits a note into its frontmatter block (through the closing `---`
+    /// line and any blank lines after it) and the body. Loading and
+    /// write-back both use this, so they always agree on where the body starts.
+    static func splitFrontmatter(_ text: String) -> (head: String, body: String)? {
         guard text.hasPrefix("---"),
-              let end = text.range(of: "\n---", range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex) else { return text }
-        var rest = String(text[end.upperBound...])
-        if let nl = rest.firstIndex(of: "\n") { rest = String(rest[rest.index(after: nl)...]) }
-        return rest.trimmingCharacters(in: .whitespacesAndNewlines)
+              let end = text.range(of: "\n---", range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex)
+        else { return nil }
+        var bodyStart = text[end.upperBound...].firstIndex(of: "\n").map { text.index(after: $0) } ?? text.endIndex
+        while bodyStart < text.endIndex, text[bodyStart].isWhitespace {
+            bodyStart = text.index(after: bodyStart)
+        }
+        return (String(text[..<bodyStart]),
+                String(text[bodyStart...]).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    static func stripFrontmatter(_ text: String) -> String {
+        splitFrontmatter(text)?.body ?? text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func tags(in fm: String) -> [String] {

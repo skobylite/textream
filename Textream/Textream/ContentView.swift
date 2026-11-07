@@ -654,7 +654,6 @@ Happy presenting! [wave]
             // Empty scripts clean themselves up when you move off them.
             if old != new, old < service.pages.count, service.pages.count > 1,
                service.pages[old].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ScriptQueue.shared.pageRemoved(at: old)
                 service.pages.remove(at: old)
                 if service.currentPageIndex > old { service.currentPageIndex -= 1 }
             }
@@ -808,7 +807,6 @@ Happy presenting! [wave]
         if isRecording {
             stopRecording()
         }
-        ScriptQueue.shared.pageRemoved(at: index)
         withAnimation(.easeInOut(duration: 0.2)) {
             service.pages.remove(at: index)
             if service.currentPageIndex >= service.pages.count {
@@ -854,6 +852,7 @@ Happy presenting! [wave]
             do {
                 let notes = try PresentationNotesExtractor.extractNotes(from: url)
                 DispatchQueue.main.async {
+                    ScriptQueue.shared.resetSlot()
                     service.pages = notes
                     service.savedPages = notes
                     service.currentPageIndex = 0

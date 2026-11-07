@@ -70,16 +70,14 @@ private final class FirstResponderTextViewSpy: UITextView {
 
 @Suite("Prompt core")
 struct PromptCoreTests {
-    @MainActor
-
-@Test @MainActor
-func nearCameraColumnFollowsTheCameraEdgeInLandscape() {
-    #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .landscapeLeft) == .leading)
-    #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .landscapeRight) == .trailing)
-    #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .portrait) == .center)
-    #expect(PromptHorizontalPosition.trailing.resolvedAlignment(orientation: .landscapeLeft) == .trailing)
-    #expect(PromptTextWidth.narrow.fraction == 0.5)
-}
+    @Test @MainActor
+    func nearCameraColumnFollowsTheCameraEdgeInLandscape() {
+        #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .landscapeLeft) == .leading)
+        #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .landscapeRight) == .trailing)
+        #expect(PromptHorizontalPosition.nearCamera.resolvedAlignment(orientation: .portrait) == .center)
+        #expect(PromptHorizontalPosition.trailing.resolvedAlignment(orientation: .landscapeLeft) == .trailing)
+        #expect(PromptTextWidth.narrow.fraction == 0.5)
+    }
 
     @Test
     func scriptEditorKeepsFocusAndSelectionAcrossEveryTypingBindingEcho() {

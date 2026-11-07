@@ -4,8 +4,13 @@
 <dict>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Textream uses the camera to preview and record your teleprompter videos.</string>
+	<string>Textream uses the camera to preview and record your teleprompter videos, and to scan the QR code that connects to your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Textream connects to Textream on your Mac over your local network to follow its script.</string>
 	<key>NSMicrophoneUsageDescription</key>

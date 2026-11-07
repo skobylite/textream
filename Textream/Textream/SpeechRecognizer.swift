@@ -877,6 +877,7 @@ class SpeechRecognizer {
     private var regressionCandidates: [Int] = []
     private static let regressionWindowChars = 700
     private static let regressionMinWords = 4
+    private static let regressionMinGapChars = 30
 
     /// If the tail of what was just spoken matches a run of words behind the
     /// current position, jump back there. Requires two consecutive results to
@@ -888,57 +889,76 @@ class SpeechRecognizer {
         guard spokenWords.count >= Self.regressionMinWords else { return }
         let tail = Array(spokenWords.suffix(Self.regressionMinWords + 2))
 
-        let windowStart = max(0, recognizedCharCount - Self.regressionWindowChars)
-        guard windowStart < recognizedCharCount else { return }
-
-        // Source words with their char offsets, restricted to the window.
-        var offsets: [(word: String, start: Int)] = []
-        var pos = 0
-        for w in sourceText.split(separator: " ", omittingEmptySubsequences: false) {
-            let word = String(w)
-            if pos >= windowStart, pos < recognizedCharCount, !Self.isAnnotationWord(word) {
-                let clean = word.lowercased().filter { $0.isLetter || $0.isNumber }
-                if !clean.isEmpty { offsets.append((clean, pos)) }
-            }
-            pos += word.count + 1
-        }
-        guard offsets.count >= Self.regressionMinWords else { return }
-
-        // Best run: longest consecutive match of the spoken tail inside the window.
-        var bestStart: Int? = nil
-        var bestLen = 0
-        for i in 0..<offsets.count {
-            var len = 0
-            var j = 0
-            while i + len < offsets.count, j < tail.count {
-                let src = offsets[i + len].word, spk = tail[j]
-                if src == spk || isFuzzyMatch(src, spk) { len += 1 }
-                j += 1
-            }
-            if len > bestLen { bestLen = len; bestStart = offsets[i].start }
-        }
-        guard bestLen >= Self.regressionMinWords, let start = bestStart,
-              start < recognizedCharCount - 20 else {
+        guard let end = Self.regressionEnd(
+            source: sourceText, current: recognizedCharCount, tail: tail,
+            matches: { [self] in $0 == $1 || isFuzzyMatch($0, $1) }
+        ) else {
             regressionCandidates = []
             return
         }
 
-        regressionCandidates.append(start)
+        regressionCandidates.append(end)
         if regressionCandidates.count > 2 { regressionCandidates.removeFirst() }
         guard regressionCandidates.count == 2,
               abs(regressionCandidates[0] - regressionCandidates[1]) <= 15 else { return }
         regressionCandidates = []
 
-        // Land at the start of the re-read run; matching resumes from there
-        // with only the re-read words left in the transcript.
-        let target = advancePastAnnotations(from: start)
+        // Land just after the re-read words, where the reader is now, and
+        // treat everything spoken so far as consumed so matching continues
+        // forward from there.
+        let target = advancePastAnnotations(from: min(end + 1, sourceText.count))
         recognizedCharCount = target
         matchStartOffset = target
         recentMatchPositions = []
-        let keep = max(0, fullSpoken.count - spoken.count)
-        let tailChars = tail.reduce(0) { $0 + $1.count + 1 }
-        spokenAnchorPrefix = String(fullSpoken.prefix(max(keep, fullSpoken.count - tailChars)))
+        spokenAnchorPrefix = fullSpoken
         lastJumpAt = Date()
+    }
+
+    /// Where the reader is when the spoken tail matches a run of words behind
+    /// `current`: the char offset just after the run's last matched word.
+    /// Nil when there is no run of `regressionMinWords` or more, or when the
+    /// run ends within `regressionMinGapChars` of `current` (that is just the
+    /// words most recently read, not a re-read).
+    static func regressionEnd(
+        source: String, current: Int, tail: [String],
+        matches: (String, String) -> Bool
+    ) -> Int? {
+        let windowStart = max(0, current - regressionWindowChars)
+        guard windowStart < current else { return nil }
+
+        var offsets: [(word: String, start: Int, length: Int)] = []
+        var pos = 0
+        for w in source.split(separator: " ", omittingEmptySubsequences: false) {
+            let word = String(w)
+            if pos >= windowStart, pos < current, !isAnnotationWord(word) {
+                let clean = word.lowercased().filter { $0.isLetter || $0.isNumber }
+                if !clean.isEmpty { offsets.append((clean, pos, word.count)) }
+            }
+            pos += word.count + 1
+        }
+        guard offsets.count >= regressionMinWords else { return nil }
+
+        var bestEnd: Int? = nil
+        var bestLen = 0
+        for i in 0..<offsets.count {
+            var len = 0
+            var j = 0
+            var lastMatched = -1
+            while i + len < offsets.count, j < tail.count {
+                if matches(offsets[i + len].word, tail[j]) {
+                    lastMatched = i + len
+                    len += 1
+                }
+                j += 1
+            }
+            if len > bestLen, lastMatched >= 0 {
+                bestLen = len
+                bestEnd = offsets[lastMatched].start + offsets[lastMatched].length
+            }
+        }
+        guard bestLen >= regressionMinWords, let end = bestEnd,
+              end < current - regressionMinGapChars else { return nil }
+        return end
     }
 
     private func advancePastAnnotations(from offset: Int) -> Int {

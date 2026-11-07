@@ -72,6 +72,10 @@ final class SpeechFollower {
             isListening = true
         case .wordTracking:
             beginRecognition()
+        case .followMac:
+            // The Mac does the listening; the phone only mirrors its progress.
+            isStarting = false
+            isListening = false
         }
     }
 

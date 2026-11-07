@@ -54,7 +54,8 @@ class ExternalDisplayController {
             content: overlayContent,
             speechRecognizer: speechRecognizer,
             mirrorAxis: mirrorAxis,
-            handlesAutoNextPage: false
+            handlesAutoNextPage: false,
+            usesExternalSizing: true
         )
 
         let hostingView = NSHostingView(rootView: content)
@@ -117,6 +118,9 @@ struct ExternalDisplayView: View {
     @Bindable var speechRecognizer: SpeechRecognizer
     let mirrorAxis: MirrorAxis?
     let handlesAutoNextPage: Bool
+    /// The External tab's text size and column width. Fullscreen on the Mac's
+    /// own screen shares this view but keeps the automatic layout.
+    var usesExternalSizing: Bool = false
 
     private var words: [String] { content.words }
     private var totalCharCount: Int { content.totalCharCount }
@@ -239,10 +243,11 @@ struct ExternalDisplayView: View {
     private var prompterView: some View {
         GeometryReader { geo in
             let settings = NotchSettings.shared
-            let fontSize = max(48, min(96, geo.size.width / 14)) * settings.externalTextScale
+            let textScale = usesExternalSizing ? settings.externalTextScale : 1
+            let column = usesExternalSizing ? settings.externalColumnWidth : 1
+            let fontSize = max(48, min(96, geo.size.width / 14)) * textScale
             // Narrower column: extra side margin split evenly on both sides.
-            let hPad = max(40, geo.size.width * 0.08)
-                + geo.size.width * (1 - settings.externalColumnWidth) / 2
+            let hPad = max(40, geo.size.width * 0.08) + geo.size.width * (1 - column) / 2
 
             VStack(spacing: 0) {
                 Spacer().frame(height: 20)

@@ -22,7 +22,10 @@ class TextreamService: NSObject, ObservableObject {
     @Published var directorIsReading = false
 
     @Published var pages: [String] = [""] {
-        didSet { scheduleDraftSave() }
+        didSet {
+            ScriptQueue.shared.pagesDidChange(from: oldValue, to: pages)
+            scheduleDraftSave()
+        }
     }
     @Published var currentPageIndex: Int = 0 {
         didSet { scheduleDraftSave() }
@@ -209,21 +212,6 @@ class TextreamService: NSObject, ObservableObject {
         ScriptQueue.shared.scheduleSync()
     }
 
-    /// One-time: older builds kept a separate draft library. Fold any of its
-    /// pages that are not already present into the page list, then delete it.
-    private func migrateOldLibraryIntoPages() {
-        struct OldDraft: Codable { var pages: [String] }
-        let key = "draftLibrary"
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let docs = try? JSONDecoder().decode([OldDraft].self, from: data) else { return }
-        for doc in docs {
-            for page in doc.pages where !page.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if !pages.contains(page) { pages.append(page) }
-            }
-        }
-        UserDefaults.standard.removeObject(forKey: key)
-    }
-
     /// Returns true when a draft was restored, so the caller does not seed the
     /// sample script over the top of it.
     @discardableResult
@@ -237,7 +225,6 @@ class TextreamService: NSObject, ObservableObject {
 
         pages = stored
         currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
-        migrateOldLibraryIntoPages()
 
         // Drop exact-duplicate and empty pages accumulated by earlier builds.
         var seen = Set<String>()
