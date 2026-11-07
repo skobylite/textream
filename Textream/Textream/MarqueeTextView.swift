@@ -146,6 +146,7 @@ struct SpeechScrollView: View {
     @State private var stableTopLineCenter: CGFloat?
     @State private var stableLineAdvance: CGFloat?
     @State private var allowsNextBackwardTrackingUpdate = false
+    @State private var peekResetGeneration = 0
     @State private var hasAppliedTrackingTarget = false
     @State private var anchoredLayoutWidth: CGFloat = 0
     @State private var anchoredParagraphBreakBeforeWordIndices: Set<Int> = []
@@ -181,6 +182,7 @@ struct SpeechScrollView: View {
                 containerWidth: geo.size.width,
                 onWordTap: { charOffset in
                     let tappedWordIndex = wordIndex(at: charOffset)
+                    peekResetGeneration += 1
                     manualOffset = 0
                     if charOffset < highlightedCharCount {
                         allowsNextBackwardTrackingUpdate = true
@@ -340,9 +342,14 @@ struct SpeechScrollView: View {
                             onManualScroll?(false, newProgress)
                         } else if isListening {
                             // Live word tracking: glide back to the tracked
-                            // position after a short pause.
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                                if !isUserScrolling {
+                            // position after a pause long enough to find a
+                            // spot and click it. Each new scroll invalidates
+                            // the earlier timer, so a stale one cannot reset
+                            // the view mid-hunt.
+                            peekResetGeneration += 1
+                            let generation = peekResetGeneration
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                                if generation == peekResetGeneration, !isUserScrolling {
                                     withAnimation(.easeInOut(duration: 0.4)) {
                                         manualOffset = 0
                                     }
