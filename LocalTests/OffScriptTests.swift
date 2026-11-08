@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -51,6 +51,41 @@ check("1 script word since the anchor fits", !offScript(launch, held: held, "we"
 check("words read just past the highlight fit (candidate ahead)",
       !offScript(launch, held: held, candidate: endOf("We tried paid", in: launch) + 1, "all we tried paid"))
 check("the check skips [smile]", SR.offScriptWindow(source: launch, from: held, to: held).contains("smile") == false)
+
+// One script word said as several words (REPAIR r2: each extra word counted
+// as a miss, so the highlight held for 3 words).
+let intro = "Hi, I'm Sarah and today I'm going to show you what we've learned. We don't run ads and we're still booked. We use CRM tools and a step-by-step guide every day."
+let atHi = startOf("Hi,", in: intro)
+check("'I am' read for 'I'm' is not off script", !offScript(intro, held: atHi, "hi i am sarah"))
+check("'do not' read for 'don't' is not off script",
+      !offScript(intro, held: startOf("We don't", in: intro), "booked we do not"))
+check("'we are' read for 'we're' is not off script",
+      !offScript(intro, held: startOf("and we're", in: intro), "do not run ads and we are still"))
+check("'c r m' read for 'CRM' is not off script",
+      !offScript(intro, held: startOf("CRM", in: intro), "we use c r m tools"))
+check("'c r m' cut by the newest-4 edge is not off script",
+      !offScript(intro, held: startOf("tools and", in: intro), "c r m tools and"))
+check("'c r' while the reader says 'CRM' is not off script",
+      !offScript(intro, held: startOf("CRM", in: intro), "and we use c r"))
+check("'step by step' read for 'step-by-step' is not off script",
+      !offScript(intro, held: startOf("step-by-step", in: intro), "a step by step guide"))
+check("an ad-lib after a contraction is still off script",
+      offScript(intro, held: startOf("I'm Sarah", in: intro), "i am sorry hang on"))
+check("isSpokenForm: 'do not' for 'dont'", SR.isSpokenForm("dont", ["do", "not"][...]))
+check("isSpokenForm: 'we have' for 'weve'", SR.isSpokenForm("weve", ["we", "have"][...]))
+check("isSpokenForm: 'we had' is not 'weve'", !SR.isSpokenForm("weve", ["we", "had"][...]))
+check("isSpokenForm: one word is not a spoken form of a longer word", !SR.isSpokenForm("im", ["i"][...]))
+check("joinSpokenForms joins 'i am' and 'c r m'",
+      SR.joinSpokenForms(said("hi i am sarah we use c r m"), script: said("hi im sarah we use crm")) == said("hi im sarah we use crm"))
+check("joinSpokenForms keeps words that say no script word",
+      SR.joinSpokenForms(said("i am sorry"), script: said("hi sarah")) == said("i am sorry"))
+check("joinSpokenForms joins a partial word only at the end with partialEnd",
+      SR.joinSpokenForms(said("use c r"), script: said("use crm"), partialEnd: true) == said("use crm")
+      && SR.joinSpokenForms(said("use c r"), script: said("use crm")) == said("use c r"))
+let atSarah = startOf("Sarah and", in: intro)
+check("support: 'hi i am sarah' moves on to 'Sarah'",
+      SR.supportEnd(source: intro, spoken: said("hi i am sarah"), current: startOf("I'm Sarah", in: intro),
+                    candidate: atSarah, matches: eq)?.end == endOf("Sarah", in: intro))
 
 // Pick-up near the held place.
 let same = resume(launch, held: held, "sorry where was I we tried paid")

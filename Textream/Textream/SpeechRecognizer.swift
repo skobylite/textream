@@ -1005,11 +1005,53 @@ class SpeechRecognizer {
     }
 
     /// How many of the newest `offScriptCheckWords` spoken words are not part
-    /// of the longest in-order match with the script words in `window`.
+    /// of the longest in-order match with the script words in `window`. A
+    /// script word said as several words counts as one word.
     static func offScriptMisses(spoken: [String], window: [String],
                                 matches: (String, String) -> Bool) -> Int {
-        let newest = Array(spoken.suffix(offScriptCheckWords))
+        let recent = Array(spoken.suffix(offScriptCheckWords * spokenFormMaxWords))
+        let newest = Array(joinSpokenForms(recent, script: window, partialEnd: true).suffix(offScriptCheckWords))
         return newest.count - inOrderHits(newest, window, matches: matches)
+    }
+
+    /// The most spoken words that can stand for one script word.
+    static let spokenFormMaxWords = 3
+    /// The ends of contractions (letters only) and the words they stand for.
+    static let contractionEnds: [String: Set<String>] = ["m": ["am"], "s": ["is", "has", "us"], "ve": ["have"], "re": ["are"], "ll": ["will"], "d": ["would", "had"], "t": ["not"], "nt": ["not"]]
+
+    /// True when spoken `words` say the script word `script` as more words:
+    /// joined they are the script word ("c r m" for "CRM", "step by step" for
+    /// "step-by-step"), or they are a contraction said in full ("i am" for
+    /// "I'm", "do not" for "don't").
+    static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
+        if words.joined() == script { return true }
+        guard words.count == 2, let first = words.first, let last = words.last,
+              first.count < script.count, script.hasPrefix(first) else { return false }
+        return contractionEnds[String(script.dropFirst(first.count))]?.contains(last) == true
+    }
+
+    /// `spoken` with each 2 or 3 words in a row that say one word of `script`
+    /// (see `isSpokenForm`) replaced by that word. With `partialEnd`, the
+    /// last 2 or 3 words can also be the start of one ("c r" while the reader
+    /// says "CRM").
+    static func joinSpokenForms(_ spoken: [String], script: [String], partialEnd: Bool = false) -> [String] {
+        var out: [String] = []
+        var i = 0
+        while i < spoken.count {
+            var joined: (word: String, count: Int)?
+            for k in stride(from: spokenFormMaxWords, through: 2, by: -1) where i + k <= spoken.count {
+                let group = spoken[i..<(i + k)]
+                let atEnd = partialEnd && i + k == spoken.count
+                if let w = script.first(where: { isSpokenForm($0, group)
+                    || (atEnd && $0.count > group.joined().count && $0.hasPrefix(group.joined())) }) {
+                    joined = (w, k)
+                    break
+                }
+            }
+            out.append(joined?.word ?? spoken[i])
+            i += joined?.count ?? 1
+        }
+        return out
     }
 
     /// Script words for the off-script check: `offScriptBackWords` words
@@ -1127,11 +1169,12 @@ class SpeechRecognizer {
     /// `current` is preferred; support behind it still means on script.
     static func supportEnd(source: String, spoken: [String], current: Int, candidate: Int,
                            matches: (String, String) -> Bool) -> (end: Int, matches: Int)? {
-        let tail = Array(spoken.suffix(supportTailWords))
-        guard !tail.isEmpty else { return nil }
-        let minMatches = min(supportMinMatches, tail.count)
         let words = regressionSourceWords(source, from: max(0, current - supportBackChars),
                                           to: max(candidate, current) + supportAheadChars)
+        let recent = Array(spoken.suffix(supportTailWords * spokenFormMaxWords))
+        let tail = Array(joinSpokenForms(recent, script: words.map(\.word)).suffix(supportTailWords))
+        guard !tail.isEmpty else { return nil }
+        let minMatches = min(supportMinMatches, tail.count)
         var behind: (end: Int, matches: Int)?
         var ahead: (end: Int, matches: Int)?
         for e in words.indices {
