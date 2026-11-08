@@ -88,6 +88,39 @@ let last = "It was one offer, one audience, one channel and ninety days of showi
 check("slip at the page end: 'in the it one' picks up after 'one.'",
       resume(last, held: endOf("I will see you", in: last) + 1, "you in the it one")?.end == last.count + 1)
 
+// Fewer than 3 words left on the page after the held place (REPAIR r1: the
+// hold never released there, so the page never ended).
+let thanks = "So this week, pick one platform and reply to every person. And that is all. Thank you."
+let atThank = startOf("Thank you.", in: thanks)
+check("2 words left: both said after an ad-lib pick up to the page end",
+      resume(thanks, held: atThank, "and by the way I love this crowd thank you")?.end == thanks.count + 1)
+check("2 words left: an ad-lib that ends in the last word does not pick up",
+      resume(thanks, held: atThank, "I really want to tell you") == nil)
+check("2 words left: 'thank' alone moves on to 'you', not to the page end",
+      resume(thanks, held: atThank, "okay so thank")?.end == endOf("Thank", in: thanks) + 1)
+let tell2 = "Try it this week. Then tell me what happened."
+let atWhat = startOf("what happened.", in: tell2)
+check("2 words left, first misheard ('wuat happened') picks up to the page end",
+      resume(tell2, held: atWhat, "well I mean like wuat happened")?.end == tell2.count + 1)
+check("2 words left: one short word alone does not pick up",
+      resume(thanks, held: atThank, "okay so you") == nil)
+let one = "So this week, pick one platform and reply to every person. Thanks."
+check("1 word left: said after an ad-lib picks up to the page end",
+      resume(one, held: startOf("Thanks.", in: one), "and by the way I love this crowd thanks")?.end == one.count + 1)
+check("1 word left: ad-lib words do not pick up",
+      resume(one, held: startOf("Thanks.", in: one), "and by the way I love this crowd") == nil)
+let tell = "Try it this week. Then come back and tell me what happened."
+let atMe = startOf("me what happened.", in: tell)
+check("3 words left, short word misheard ('to' for 'me') picks up to the page end",
+      resume(tell, held: atMe, "close the window to what happened")?.end == tell.count + 1)
+check("3 words left, all heard picks up", resume(tell, held: atMe, "close the window me what happened")?.end == tell.count + 1)
+check("3 words left: the first 2 heard pick up to after them, not to the page end",
+      resume(tell, held: atMe, "close the window me what")?.end == endOf("me what", in: tell) + 1)
+check("3 words left: only the last word heard does not pick up", resume(tell, held: atMe, "close the window happened") == nil)
+check("a 2-word page after 2 ad-lib words picks up", resume("Thank you!", held: 0, "okay so thank you")?.end == 11)
+check("not at the page end: 2 script words are still not enough",
+      resume(launch, held: held, "okay where was I we tried") == nil)
+
 // Support for forward moves.
 let story = "Hi everyone. The thing is that I never planned to start a business. I was working a normal job and I was happy enough with it. Then one day my manager called me into his office and told me that the whole team was being let go at the end of the month."
 let afterIt = endOf("happy enough with it.", in: story) + 1

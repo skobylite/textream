@@ -880,11 +880,13 @@ class SpeechRecognizer {
             return
         }
         // The newest words do not fit the script around the highlight: the
-        // reader has gone off script. Hold here.
+        // reader has gone off script. Hold here. Not while the highlight is
+        // still on a tapped word: the reader may be finishing the old sentence.
         let spokenWords = Self.regressionWords(in: spoken)
         let window = Self.offScriptWindow(source: sourceText, from: recognizedCharCount,
                                           to: max(candidate, recognizedCharCount))
-        if Self.offScriptMisses(spoken: spokenWords, window: window, matches: regressionMatch) > Self.offScriptMaxMisses {
+        if !(regressionFloor > 0 && recognizedCharCount == regressionFloor),
+           Self.offScriptMisses(spoken: spokenWords, window: window, matches: regressionMatch) > Self.offScriptMaxMisses {
             isOffScript = true
             return
         }
@@ -1074,6 +1076,7 @@ class SpeechRecognizer {
         let words = regressionSourceWords(source, from: max(0, held - 200),
                                           to: min(source.count, held + resumeFarChars))
         let iHeld = words.firstIndex { $0.start >= held } ?? words.count
+        let atEnd = held + resumeFarChars >= source.count
         func same(_ a: String, _ b: String) -> Bool {
             min(a.count, b.count) < resumeExactBelowLetters ? a == b : matches(a, b)
         }
@@ -1096,6 +1099,20 @@ class SpeechRecognizer {
                newest.prefix(2).contains(where: { same(words[i].word, $0) }) {
                 let span = words[i..<min(words.count, i + offScriptCheckWords + 1)].map(\.word)
                 if let m = inOrderLast(newest, span, matches: same), m.hits >= resumeSlipHits {
+                    return (words[i].start, end(i + m.last), newest.count)
+                }
+            }
+            // At most resumeRunWords words from here to the page end, and none
+            // after the held place left out: all of them in a row pick up, or
+            // all but one in order (a single word must have 5 letters or more).
+            let left = words.count - i
+            if atEnd, i <= iHeld, left <= resumeRunWords {
+                if left < resumeRunWords, spoken.count >= left, runAt(i, left) {
+                    return (words[i].start, end(words.count - 1), left)
+                }
+                if left >= 2, let m = inOrderLast(newest, words[i...].map(\.word), matches: same),
+                   i + m.last >= iHeld, m.hits >= left - 1,
+                   m.hits >= 2 || words[i + m.last].word.count >= resumeExactBelowLetters {
                     return (words[i].start, end(i + m.last), newest.count)
                 }
             }
