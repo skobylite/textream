@@ -163,6 +163,7 @@ class SpeechRecognizer {
         regressionPending = nil
         regressionUndo = nil
         regressionFloor = 0
+        isOffScript = false
     }
 
     /// Jump highlight to a specific char offset (e.g. when user taps a word).
@@ -186,6 +187,7 @@ class SpeechRecognizer {
         regressionPending = nil
         regressionUndo = nil
         regressionFloor = targetOffset
+        isOffScript = false
         if isListening && (distance > 500 || !audioEngine.isRunning) {
             // Far jump, or the engine died without a config-change callback —
             // fall back to a full restart (also refreshes contextualStrings).
@@ -213,6 +215,7 @@ class SpeechRecognizer {
         regressionPending = nil
         regressionUndo = nil
         regressionFloor = 0
+        isOffScript = false
         error = nil
         sessionGeneration &+= 1
         shouldListen = true
@@ -327,6 +330,7 @@ class SpeechRecognizer {
         recentMatchPositions = []
         regressionPending = nil
         regressionUndo = nil
+        isOffScript = false
         shouldDismiss = false
         error = nil
         sessionGeneration &+= 1
@@ -832,6 +836,29 @@ class SpeechRecognizer {
             return
         }
 
+        // Off script: hold the highlight until the newest words are script
+        // words again near the held place (or a longer, unique run further
+        // on), or the reader re-reads an earlier line.
+        if isOffScript {
+            if checkForRegression(spoken: spoken, fullSpoken: fullSpoken, current: recognizedCharCount) {
+                isOffScript = false
+                return
+            }
+            guard let run = Self.offScriptResume(source: sourceText, held: recognizedCharCount,
+                                                 spoken: Self.regressionWords(in: spoken),
+                                                 matches: regressionMatch) else { return }
+            // Match on from the start of the run, with the run words as the
+            // first words since the anchor, so that a later revision of those
+            // words is matched at the same place.
+            isOffScript = false
+            recognizedCharCount = advancePastAnnotations(from: min(run.end, sourceText.count))
+            matchStartOffset = run.start
+            recentMatchPositions = []
+            regressionPending = nil
+            spokenAnchorPrefix = Self.dropLastWords(fullSpoken, run.words)
+            return
+        }
+
         // Strategy 1: character-level fuzzy match from the start offset
         let charResult = charLevelMatch(spoken: spoken)
 
@@ -844,7 +871,7 @@ class SpeechRecognizer {
         let best = SpeechTextAlignment.bestOffset(characterResult: charResult, wordResult: wordResult)
 
         let rawCandidate = min(matchStartOffset + best, sourceText.count)
-        let candidate = advancePastAnnotations(from: rawCandidate)
+        var candidate = advancePastAnnotations(from: rawCandidate)
         // The reader may have gone back to re-read an earlier line. The
         // re-read words can also look like small forward progress, so check
         // before any forward move.
@@ -852,9 +879,30 @@ class SpeechRecognizer {
                               current: max(candidate, recognizedCharCount)) {
             return
         }
+        // The newest words do not fit the script around the highlight: the
+        // reader has gone off script. Hold here.
+        let spokenWords = Self.regressionWords(in: spoken)
+        let window = Self.offScriptWindow(source: sourceText, from: recognizedCharCount,
+                                          to: max(candidate, recognizedCharCount))
+        if Self.offScriptMisses(spoken: spokenWords, window: window, matches: regressionMatch) > Self.offScriptMaxMisses {
+            isOffScript = true
+            return
+        }
         // Do not move forward while a re-read waits for confirmation, so the
         // highlight does not run ahead before it jumps back.
-        guard candidate > recognizedCharCount, regressionPending == nil else { return }
+        guard regressionPending == nil else { return }
+        // A forward move needs the newest words to be script words, and it
+        // goes no further than they do. When all of them match just ahead
+        // and the matchers lag, follow them.
+        guard let support = Self.supportEnd(source: sourceText, spoken: spokenWords, current: recognizedCharCount,
+                                            candidate: candidate, matches: supportMatch) else { return }
+        var forward = candidate
+        if support.matches >= Self.supportTailWords, support.end + 1 > candidate,
+           support.end <= recognizedCharCount + Self.supportFarChars {
+            forward = advancePastAnnotations(from: min(support.end + 1, sourceText.count))
+        }
+        candidate = advancePastAnnotations(from: min(forward, support.end + 1, sourceText.count))
+        guard candidate > recognizedCharCount else { return }
         // A move to the end of the page ends the page. Hold it while the
         // newest words look like the start of a re-read, so that the re-read
         // can still take the highlight back.
@@ -908,6 +956,194 @@ class SpeechRecognizer {
         let common = zip(spokenAnchorPrefix, fullSpoken).prefix(while: { $0 == $1 }).count
         let trimLen = min(fullSpoken.count, max(common, spokenAnchorPrefix.count - 24))
         return String(fullSpoken.dropFirst(trimLen))
+    }
+
+    // MARK: - Off script (ad-lib) hold
+
+    /// True while the reader says words that are not in the script near the
+    /// highlight (an ad-lib). The highlight holds until offScriptResume finds
+    /// the reader, or the reader re-reads an earlier line.
+    private(set) var isOffScript = false
+
+    /// The newest spoken words checked against the script around the highlight.
+    static let offScriptCheckWords = 4
+    /// More misses than this among them (in order) means off script.
+    static let offScriptMaxMisses = 1
+    /// The check window: script words before the highlight and after the candidate.
+    static let offScriptBackWords = 4
+    static let offScriptAheadWords = 3
+    /// Pick-up near the held place: the newest 3 spoken words are 3 script
+    /// words in a row that start from 4 words before to 12 words after it.
+    static let resumeRunWords = 3
+    static let resumeBackWords = 4
+    static let resumeNearWords = 12
+    /// Or 3 of the newest 4 words match in order inside 5 script words that
+    /// start on one of the first 2 of them (one misheard word).
+    static let resumeSlipHits = 3
+    /// Further on, up to 400 chars after the held place (the next
+    /// paragraph): 4 words in a row, found nowhere else in the searched text.
+    static let resumeFarRunWords = 4
+    static let resumeFarChars = 400
+    /// In pick-up runs, words shorter than 5 letters must match exactly.
+    static let resumeExactBelowLetters = 5
+    /// A forward move needs 2 of the newest 3 words to match script words in
+    /// order (at most 1 script word skipped between them) from 30 chars
+    /// before the highlight to 40 chars after the candidate. Support that
+    /// starts more than 40 chars after the highlight needs 3 matches.
+    static let supportTailWords = 3
+    static let supportMinMatches = 2
+    static let supportBackChars = 30
+    static let supportAheadChars = 40
+    static let supportGap = 1
+    static let supportFarChars = 40
+
+    /// Words of 3 letters or fewer must match exactly in the support check.
+    private func supportMatch(_ a: String, _ b: String) -> Bool {
+        a == b || (min(a.count, b.count) >= 4 && isFuzzyMatch(a, b))
+    }
+
+    /// How many of the newest `offScriptCheckWords` spoken words are not part
+    /// of the longest in-order match with the script words in `window`.
+    static func offScriptMisses(spoken: [String], window: [String],
+                                matches: (String, String) -> Bool) -> Int {
+        let newest = Array(spoken.suffix(offScriptCheckWords))
+        return newest.count - inOrderHits(newest, window, matches: matches)
+    }
+
+    /// Script words for the off-script check: `offScriptBackWords` words
+    /// before `from`, the words from `from` to `to`, and
+    /// `offScriptAheadWords` words after `to`. Stage directions are left out.
+    static func offScriptWindow(source: String, from: Int, to: Int) -> [String] {
+        let words = regressionSourceWords(source, from: max(0, from - 400), to: min(source.count, to + 400))
+        let i0 = words.firstIndex { $0.start >= from } ?? words.count
+        let i1 = words.firstIndex { $0.start >= to } ?? words.count
+        return words[max(0, i0 - offScriptBackWords)..<min(words.count, i1 + offScriptAheadWords)].map(\.word)
+    }
+
+    /// The length of the longest in-order match between spoken and script words.
+    static func inOrderHits(_ spoken: [String], _ script: [String],
+                            matches: (String, String) -> Bool) -> Int {
+        guard !spoken.isEmpty, !script.isEmpty else { return 0 }
+        var prev = [Int](repeating: 0, count: script.count + 1)
+        for w in spoken {
+            var cur = [Int](repeating: 0, count: script.count + 1)
+            for j in script.indices {
+                cur[j + 1] = matches(script[j], w) ? prev[j] + 1 : max(prev[j + 1], cur[j])
+            }
+            prev = cur
+        }
+        return prev[script.count]
+    }
+
+    /// The longest in-order match and the script index of the first script
+    /// word that completes it.
+    static func inOrderLast(_ spoken: [String], _ script: [String],
+                            matches: (String, String) -> Bool) -> (hits: Int, last: Int)? {
+        guard !spoken.isEmpty, !script.isEmpty else { return nil }
+        let n = spoken.count, m = script.count
+        var dp = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
+        for i in 1...n { for j in 1...m {
+            dp[i][j] = matches(script[j - 1], spoken[i - 1]) ? dp[i - 1][j - 1] + 1 : max(dp[i - 1][j], dp[i][j - 1])
+        } }
+        guard dp[n][m] > 0 else { return nil }
+        var j = 1
+        while dp[n][j] < dp[n][m] { j += 1 }
+        return (dp[n][m], j - 1)
+    }
+
+    /// `text` without its last `n` space-separated words.
+    static func dropLastWords(_ text: String, _ n: Int) -> String {
+        var idx = text.endIndex
+        var left = n
+        while left > 0, idx > text.startIndex {
+            idx = text.index(before: idx)
+            while idx > text.startIndex, text[idx] == " " { idx = text.index(before: idx) }
+            while idx > text.startIndex, text[text.index(before: idx)] != " " { idx = text.index(before: idx) }
+            left -= 1
+        }
+        return String(text[..<idx])
+    }
+
+    /// Where to pick up after an ad-lib: the start of the script run that the
+    /// newest spoken words match, the char offset just after its last word,
+    /// and how many newest spoken words it used. Nil while the newest words
+    /// are not back on the script. The search goes from `resumeBackWords`
+    /// words before `held` forward; the first match wins.
+    static func offScriptResume(source: String, held: Int, spoken: [String],
+                                matches: (String, String) -> Bool) -> (start: Int, end: Int, words: Int)? {
+        let words = regressionSourceWords(source, from: max(0, held - 200),
+                                          to: min(source.count, held + resumeFarChars))
+        let iHeld = words.firstIndex { $0.start >= held } ?? words.count
+        func same(_ a: String, _ b: String) -> Bool {
+            min(a.count, b.count) < resumeExactBelowLetters ? a == b : matches(a, b)
+        }
+        func runAt(_ k: Int, _ need: Int) -> Bool {
+            k >= 0 && k + need <= words.count
+                && zip(words[k..<(k + need)], spoken.suffix(need)).allSatisfy { same($0.0.word, $0.1) }
+        }
+        func end(_ k: Int) -> Int { words[k].start + words[k].length + 1 }
+        let newest = Array(spoken.suffix(offScriptCheckWords))
+        var i = max(0, iHeld - resumeBackWords)
+        while i < words.count {
+            let near = i - iHeld <= resumeNearWords
+            let need = near ? resumeRunWords : resumeFarRunWords
+            if spoken.count >= need, runAt(i, need) {
+                // A far run must be the only place with these words.
+                if !near, words.indices.contains(where: { $0 != i && runAt($0, need) }) { return nil }
+                return (words[i].start, end(i + need - 1), need)
+            }
+            if near, newest.count >= resumeSlipHits,
+               newest.prefix(2).contains(where: { same(words[i].word, $0) }) {
+                let span = words[i..<min(words.count, i + offScriptCheckWords + 1)].map(\.word)
+                if let m = inOrderLast(newest, span, matches: same), m.hits >= resumeSlipHits {
+                    return (words[i].start, end(i + m.last), newest.count)
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// The char offset where the newest spoken words end in the script when
+    /// they continue it near the highlight, and how many of them matched.
+    /// Nil when they do not: no forward move. Support that ends after
+    /// `current` is preferred; support behind it still means on script.
+    static func supportEnd(source: String, spoken: [String], current: Int, candidate: Int,
+                           matches: (String, String) -> Bool) -> (end: Int, matches: Int)? {
+        let tail = Array(spoken.suffix(supportTailWords))
+        guard !tail.isEmpty else { return nil }
+        let minMatches = min(supportMinMatches, tail.count)
+        let words = regressionSourceWords(source, from: max(0, current - supportBackChars),
+                                          to: max(candidate, current) + supportAheadChars)
+        var behind: (end: Int, matches: Int)?
+        var ahead: (end: Int, matches: Int)?
+        for e in words.indices {
+            // The newest word may be a misheard script word: try the one before it too.
+            for newest in stride(from: tail.count - 1, through: max(0, tail.count - 2), by: -1) {
+                guard matches(words[e].word, tail[newest]) else { continue }
+                var hits = 1
+                var si = e
+                var ti = newest - 1
+                while ti >= 0 && si > 0 {
+                    var hit: Int?
+                    for back in 1...(1 + supportGap) where si - back >= 0 {
+                        if matches(words[si - back].word, tail[ti]) { hit = si - back; break }
+                    }
+                    if let hit { si = hit; hits += 1 }
+                    ti -= 1
+                }
+                guard hits >= minMatches else { continue }
+                if words[e].start > current + supportFarChars, hits < supportTailWords { continue }
+                // When the newest word did not match, allow the next script word too.
+                let f = (newest < tail.count - 1 && e + 1 < words.count) ? e + 1 : e
+                let end = words[f].start + words[f].length
+                if end > current {
+                    if ahead == nil || hits > ahead!.matches { ahead = (end, hits) }
+                } else if behind == nil || hits > behind!.matches { behind = (end, hits) }
+                break
+            }
+        }
+        return ahead ?? behind
     }
 
     // MARK: - Regression (re-reading an earlier line)
