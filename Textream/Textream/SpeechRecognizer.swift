@@ -163,6 +163,36 @@ class SpeechRecognizer {
     @ObservationIgnored private var tapFrames = (min: 0, max: 0)
     @ObservationIgnored private var tapRate = 0.0
 
+    /// Apple's SpeechTranscriber (macOS 26), on with -speechEngine
+    /// speechTranscriber. Test switches: -speechFastResults NO turns off its
+    /// fast results, -speechGroupBuffers YES gives it 100 ms inputs.
+    private static let speechModelOptions = (
+        fastResults: UserDefaults.standard.object(forKey: "speechFastResults") == nil
+            || UserDefaults.standard.bool(forKey: "speechFastResults"),
+        groupBuffers: UserDefaults.standard.bool(forKey: "speechGroupBuffers")
+    )
+    private static let engineLogger = Logger(subsystem: "dev.fka.textream", category: "speechEngine")
+    /// The model while it runs.
+    @ObservationIgnored private var speechModel: (any SpeechModelSession)?
+    /// Its audio feed for the tap. requestLock guards it.
+    @ObservationIgnored private var speechModelFeed: SpeechModelFeed?
+    /// A model that finished its setup, for the next beginRecognition.
+    @ObservationIgnored private var readySpeechModel: (any SpeechModelSession)?
+    /// The last model setup or finish. A new setup waits for it, so that
+    /// only one SpeechAnalyzer runs at a time.
+    @ObservationIgnored private var speechModelChain: Task<Void, Never>?
+    @ObservationIgnored private var speechModelSetups = 0
+    /// The model failed in this session, so the session uses today's engine.
+    @ObservationIgnored private var speechModelFailed = false
+    /// The failure message, shown when today's engine has started.
+    @ObservationIgnored private var speechModelNotice: String?
+    /// The running text made from the model's results.
+    @ObservationIgnored private var engineTranscript = EngineTranscript()
+
+    private var usesSpeechModel: Bool {
+        NotchSettings.shared.speechEngine == .speechTranscriber && !speechModelFailed
+    }
+
     /// Update the source text while preserving the current recognized char count.
     /// Used by Director Mode to live-edit unread text without resetting read progress.
     func updateText(_ text: String, preservingCharCount: Int) {
@@ -188,6 +218,7 @@ class SpeechRecognizer {
     /// re-spoken word. Far jumps restart the task instead: contextualStrings
     /// are built for the section being read, and after a page-scale jump
     /// stale hints hurt recognition more than the task warm-up costs.
+    /// A far jump does not restart the macOS 26 model (see below).
     /// retryCount is deliberately not touched here — resetting it on every
     /// tap would let a user keep a failing availability-retry loop alive
     /// forever.
@@ -207,8 +238,12 @@ class SpeechRecognizer {
         if isListening && (distance > 500 || !audioEngine.isRunning) {
             // Far jump, or the engine died without a config-change callback —
             // fall back to a full restart (also refreshes contextualStrings).
-            restartRecognition(resetRetryCount: false)
-            return
+            // The macOS 26 model takes no hints, so it keeps running while
+            // its audio runs.
+            if farJumpKeepsModel?() != true {
+                restartRecognition(resetRetryCount: false)
+                return
+            }
         }
         spokenAnchorPrefix = lastSpokenText
         lastJumpAt = Date()
@@ -234,6 +269,8 @@ class SpeechRecognizer {
         regressionFloor = 0
         isOffScript = false
         error = nil
+        speechModelFailed = false
+        speechModelNotice = nil
         sessionGeneration &+= 1
         shouldListen = true
         isListening = false
@@ -272,7 +309,8 @@ class SpeechRecognizer {
 
     private func beginAfterMicrophoneAccess(for generation: Int) {
         guard shouldListen, sessionGeneration == generation else { return }
-        if NotchSettings.shared.listeningMode == .wordTracking {
+        // The macOS 26 model needs no Speech Recognition permission.
+        if NotchSettings.shared.listeningMode == .wordTracking && !usesSpeechModel {
             requestSpeechAuthAndBegin(for: generation)
         } else {
             beginRecognition()
@@ -355,6 +393,8 @@ class SpeechRecognizer {
         isOffScript = false
         shouldDismiss = false
         error = nil
+        speechModelFailed = false
+        speechModelNotice = nil
         sessionGeneration &+= 1
         shouldListen = true
         isListening = false
@@ -378,9 +418,11 @@ class SpeechRecognizer {
         requestLock.lock()
         recognitionRequest?.endAudio()
         recognitionRequest = nil
+        speechModelFeed = nil
         requestLock.unlock()
         recognitionTask?.cancel()
         recognitionTask = nil
+        stopSpeechModel()
     }
 
     private func cleanupAudioEngine() {
@@ -435,11 +477,28 @@ class SpeechRecognizer {
         isListening = false
         isStarting = true
         regressionUndo = regressionUndoForNewTask()
-        // New session = fresh transcript (see restartTask for why
+        // New session = fresh transcript (see resetForNewTranscript for why
         // lastSpokenText must be cleared alongside the anchor)
         spokenAnchorPrefix = ""
         lastSpokenText = ""
         regressionPending = nil
+
+        // The macOS 26 model: set it up first, then begin again here with it.
+        let readyModel = readySpeechModel
+        readySpeechModel = nil
+        var model: (any SpeechModelSession)?
+        if requiresSpeechRecognition && usesSpeechModel {
+            guard let readyModel else {
+                setUpSpeechModel(for: expectedSessionGeneration)
+                return
+            }
+            model = readyModel
+            speechModel = readyModel
+            engineTranscript = EngineTranscript()
+        } else if let readyModel {
+            speechModel = readyModel
+            stopSpeechModel()
+        }
 
         // Create a fresh engine so it picks up the current hardware format.
         // AVAudioEngine caches the device format internally and reset() alone
@@ -477,7 +536,7 @@ class SpeechRecognizer {
         }
 
         onDeviceRecognition = false
-        if requiresSpeechRecognition {
+        if requiresSpeechRecognition && model == nil {
             speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: NotchSettings.shared.speechLocale))
             guard let speechRecognizer else {
                 // nil means the locale isn't supported for speech recognition —
@@ -596,6 +655,13 @@ class SpeechRecognizer {
             }
         }
 
+        if let model {
+            requestLock.lock()
+            speechModelFeed = model.feed
+            requestLock.unlock()
+            farJumpKeepsModel = { [weak self] in self?.audioEngine.isRunning == true }
+        }
+
         if let speechRecognizer, let recognitionRequest {
             recognitionGeneration &+= 1
             let currentRecognitionGeneration = recognitionGeneration
@@ -666,10 +732,16 @@ class SpeechRecognizer {
                 return
             }
             error = nil
+            if let notice = speechModelNotice {
+                // Today's engine runs after the model failed: say so now,
+                // because the line above clears any earlier message.
+                error = notice
+                speechModelNotice = nil
+            }
             isStarting = false
             isListening = true
             if Self.timingLogOn { timing?.ready(at: ProcessInfo.processInfo.systemUptime) }
-            if requiresSpeechRecognition && !onDeviceRecognition {
+            if requiresSpeechRecognition && model == nil && !onDeviceRecognition {
                 startPreemptiveTimer()
             }
         } catch {
@@ -715,6 +787,7 @@ class SpeechRecognizer {
     private func appendBufferToRequest(_ buffer: AVAudioPCMBuffer) {
         requestLock.lock()
         recognitionRequest?.append(buffer)
+        speechModelFeed?.append(buffer)
         if Self.timingLogOn {
             let frames = Int(buffer.frameLength)
             tapFrames = tapFrames.max == 0 ? (frames, frames) : (min(tapFrames.min, frames), max(tapFrames.max, frames))
@@ -738,16 +811,7 @@ class SpeechRecognizer {
         recognitionGeneration &+= 1
         let currentRecognitionGeneration = recognitionGeneration
         // Update match offset before restarting
-        matchStartOffset = recognizedCharCount
-        recentMatchPositions = []
-        regressionPending = nil
-        regressionUndo = regressionUndoForNewTask()
-        // New task = fresh transcript. lastSpokenText must be cleared too:
-        // a jump taken before the first new result would otherwise anchor on
-        // the old task's transcript and trim away everything the new task
-        // ever produces.
-        spokenAnchorPrefix = ""
-        lastSpokenText = ""
+        resetForNewTranscript()
 
         // Cancel any pending restart to avoid stale beginRecognition clobbering this session
         pendingRestart?.cancel()
@@ -905,13 +969,124 @@ class SpeechRecognizer {
         guard Self.timingLogOn, let log = timing else { return }
         timing = nil
         var context = SpeechTimingLog.Context()
-        context.onDevice = onDeviceRecognition
+        context.engine = (usesSpeechModel ? SpeechEngine.speechTranscriber : .apple).rawValue
+        context.onDevice = usesSpeechModel || onDeviceRecognition
+        context.fallback = speechModelFailed
+        if let model = speechModel {
+            context.modelFrames = model.feed.inputFrames
+        }
         requestLock.lock()
         context.bufferFrames = tapFrames
         context.micRate = tapRate
         requestLock.unlock()
         let line = log.summary(at: ProcessInfo.processInfo.systemUptime, context)
         Self.timingLogger.notice("\(line, privacy: .public)")
+    }
+
+    // MARK: - Apple SpeechTranscriber (macOS 26 and later)
+
+    /// Sets up the model, then begins recognition with it. Any failure
+    /// switches this session to today's engine.
+    private func setUpSpeechModel(for generation: Int) {
+        guard #available(macOS 26.0, *) else {
+            fallBackFromSpeechModel(reason: "needs macOS 26", code: nil)
+            return
+        }
+        speechModelSetups &+= 1
+        let setup = speechModelSetups
+        let previous = speechModelChain
+        let locale = NotchSettings.shared.speechLocale
+        var options = SpeechAnalyzerEngine.Options()
+        options.fastResults = Self.speechModelOptions.fastResults
+        options.groupBuffers = Self.speechModelOptions.groupBuffers
+        let isCurrent: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.shouldListen && self.sessionGeneration == generation
+                && self.speechModelSetups == setup && !self.sourceText.isEmpty
+        }
+        speechModelChain = Task { @MainActor [weak self] in
+            do {
+                let model = try await SpeechAnalyzerEngine.start(
+                    localeIdentifier: locale, options: options, after: previous, isCurrent: isCurrent,
+                    onResult: { [weak self] result in self?.handleSpeechModelResult(result, setup: setup) },
+                    onEnd: { [weak self] error in self?.speechModelEnded(error, setup: setup) })
+                guard let self, isCurrent() else {
+                    await model.stop().value
+                    return
+                }
+                self.readySpeechModel = model
+                self.beginRecognition()
+            } catch {
+                // Not current: the session changed during the setup. A
+                // CancellationError while it is current comes from the
+                // framework (the model failed), so fall back then too.
+                guard let self, isCurrent() else { return }
+                let reason = error is CancellationError ? "the model stopped" : error.localizedDescription
+                self.fallBackFromSpeechModel(reason: reason, code: (error as NSError).code)
+            }
+        }
+    }
+
+    /// Stops the model that runs. The analyzer finishes in the background,
+    /// and the next setup waits for it.
+    private func stopSpeechModel() {
+        farJumpKeepsModel = nil
+        guard let model = speechModel else { return }
+        speechModel = nil
+        engineTranscript = EngineTranscript()
+        let previous = speechModelChain
+        let finished = model.stop()
+        speechModelChain = Task {
+            await previous?.value
+            await finished.value
+        }
+    }
+
+    private func handleSpeechModelResult(_ result: SpeechModelResult, setup: Int) {
+        guard speechModel != nil, speechModelSetups == setup, shouldListen else { return }
+        retryCount = 0
+        engineTranscript.apply(result.text, isFinal: result.isFinal)
+        let text = engineTranscript.text
+        matchResult(text, isFinal: result.isFinal)
+        // Drop the matched final text now and then, so that the text stays
+        // short. The reset is the same as for a new task of today's engine.
+        guard result.isFinal, EngineTranscript.shouldDrop(
+            textLength: text.count, settled: engineTranscript.settled,
+            rereadPending: regressionPending != nil, rereadCheckPending: regressionUndo != nil,
+            secondsSinceJump: Date().timeIntervalSince(lastJumpAt)) else { return }
+        engineTranscript.dropFinalText()
+        resetForNewTranscript()
+        if Self.timingLogOn { timing?.drop(at: ProcessInfo.processInfo.systemUptime) }
+    }
+
+    /// The model's results ended while it ran: with an error, or (nil)
+    /// without one. Both mean that the model stopped.
+    private func speechModelEnded(_ error: Error?, setup: Int) {
+        guard speechModel != nil, speechModelSetups == setup, shouldListen else { return }
+        if let error {
+            fallBackFromSpeechModel(reason: error.localizedDescription, code: (error as NSError).code)
+        } else {
+            fallBackFromSpeechModel(reason: "the model stopped", code: nil)
+        }
+    }
+
+    /// The model failed. Say so, and use today's engine for the rest of this
+    /// session. Today's engine needs Speech Recognition permission, so the
+    /// switch goes through the permission request.
+    private func fallBackFromSpeechModel(reason: String, code: Int?) {
+        speechModelFailed = true
+        speechModelNotice = "Speech model unavailable (\(reason)). Using standard recognition."
+        let codeText = code.map(String.init) ?? "none"
+        Self.engineLogger.notice("SpeechTranscriber failed, so today's engine is used: code \(codeText, privacy: .public), \(reason, privacy: .public)")
+        if Self.timingLogOn {
+            let now = ProcessInfo.processInfo.systemUptime
+            if let code { timing?.error(code: code) }
+            timing?.restart(at: now)
+        }
+        cleanupRecognition()
+        isListening = false
+        isStarting = true
+        requestSpeechAuthAndBegin(for: sessionGeneration)
     }
 
     // MARK: - Fuzzy character-level matching
@@ -1664,6 +1839,27 @@ class SpeechRecognizer {
              $0.said + Self.regressionWords(in: spokenSinceJump(lastSpokenText)))
         }
     }
+
+    /// The matcher state for a fresh transcript: a new recognition task, or
+    /// matched text that the macOS 26 engine dropped. Matching starts again
+    /// at the highlight.
+    private func resetForNewTranscript() {
+        matchStartOffset = recognizedCharCount
+        recentMatchPositions = []
+        regressionPending = nil
+        regressionUndo = regressionUndoForNewTask()
+        // New task = fresh transcript. lastSpokenText must be cleared too:
+        // a jump taken before the first new result would otherwise anchor on
+        // the old task's transcript and trim away everything the new task
+        // ever produces.
+        spokenAnchorPrefix = ""
+        lastSpokenText = ""
+    }
+
+    /// The macOS 26 engine sets this while its model runs: it is true when
+    /// a far jump can keep the model running, because the audio still runs.
+    /// Nil for today's engine.
+    private var farJumpKeepsModel: (() -> Bool)?
 
     private func regressionMatch(_ source: String, _ spoken: String) -> Bool {
         source == spoken || isFuzzyMatch(source, spoken)

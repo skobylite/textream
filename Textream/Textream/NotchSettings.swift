@@ -313,6 +313,20 @@ enum ListeningMode: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Speech Engine
+
+/// The speech engine for Word Tracking. For now only the launch argument
+/// -speechEngine speechTranscriber selects the new engine. There is no
+/// picker in Settings yet.
+enum SpeechEngine: String, CaseIterable, Identifiable {
+    /// Today's engine (SFSpeechRecognizer).
+    case apple
+    /// Apple's SpeechTranscriber: macOS 26 and later, on this Mac only.
+    case speechTranscriber
+
+    var id: String { rawValue }
+}
+
 // MARK: - Reading Position
 
 enum ReadingPosition: String, CaseIterable, Identifiable {
@@ -432,6 +446,11 @@ class NotchSettings {
 
     var listeningMode: ListeningMode {
         didSet { UserDefaults.standard.set(listeningMode.rawValue, forKey: "listeningMode") }
+    }
+
+    /// Which speech engine drives Word Tracking.
+    var speechEngine: SpeechEngine {
+        didSet { UserDefaults.standard.set(speechEngine.rawValue, forKey: "speechEngine") }
     }
 
     /// Words per second for classic and silence-paused modes
@@ -562,6 +581,7 @@ class NotchSettings {
             UserDefaults.standard.set(savedMirrorAxis.rawValue, forKey: "overlayMirrorAxis")
         }
         self.listeningMode = ListeningMode(rawValue: UserDefaults.standard.string(forKey: "listeningMode") ?? "") ?? .wordTracking
+        self.speechEngine = SpeechEngine(rawValue: UserDefaults.standard.string(forKey: "speechEngine") ?? "") ?? .apple
         let savedSpeed = UserDefaults.standard.double(forKey: "scrollSpeed")
         self.scrollSpeed = savedSpeed > 0 ? savedSpeed : 3
         self.hideFromScreenShare = UserDefaults.standard.object(forKey: "hideFromScreenShare") as? Bool ?? true
