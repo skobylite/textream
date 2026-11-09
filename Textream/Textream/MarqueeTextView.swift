@@ -142,6 +142,10 @@ struct SpeechScrollView: View {
     /// Optional preview-only transition. Live overlays keep their existing behavior.
     var readingPositionTransitionDuration: Double? = nil
     var paragraphBreakBeforeWordIndices: Set<Int> = []
+    /// The session's shared reading position. With it, a look-around scroll
+    /// on this screen moves the other screens too (as a word, not pixels).
+    /// Nil (the Settings preview) keeps the one-screen behaviour.
+    var sharedProgress: SharedScrollProgress? = nil
     @State private var scrollOffset: CGFloat = 0
     @State private var manualOffset: CGFloat = 0
     @State private var wordYPositions: [Int: CGFloat] = [:]
@@ -161,6 +165,11 @@ struct SpeechScrollView: View {
     @State private var trackedCharCount = 0
     @State private var isAnimatingReadingPositionChange = false
     @State private var readingPositionAnimationGeneration = 0
+    /// This screen's id as the source of a shared look-around scroll.
+    @State private var peekSourceID = UUID()
+    /// True while manualOffset shows a look-around scroll made on another
+    /// screen.
+    @State private var isFollowingPeek = false
 
     private var readingPositionTransitionAnimation: Animation? {
         guard let duration = readingPositionTransitionDuration, duration > 0 else {
@@ -193,6 +202,9 @@ struct SpeechScrollView: View {
                     let tappedWordIndex = wordIndex(at: charOffset)
                     peekResetGeneration += 1
                     manualOffset = 0
+                    // A tap ends the look-around on every screen.
+                    isFollowingPeek = false
+                    handlePeekEvent(.tap)
                     if charOffset < highlightedCharCount {
                         allowsNextBackwardTrackingUpdate = true
                     }
@@ -267,12 +279,15 @@ struct SpeechScrollView: View {
                     if isPeeking {
                         manualOffset -= scrollOffset - baseBefore
                     }
+                    handlePeekEvent(.highlightMoved)
                 } else if !smoothScroll {
                     // Paused word tracking: the highlight moves only on a
                     // deliberate event, such as a tap on another screen or a
                     // far tap that restarts the recognizer. Follow it.
                     peekResetGeneration += 1
                     manualOffset = 0
+                    isFollowingPeek = false
+                    handlePeekEvent(.highlightMoved)
                     recalculateTracking(containerHeight: containerHeight)
                 }
             }
@@ -280,8 +295,13 @@ struct SpeechScrollView: View {
                 // Also while paused: the shared position can move from a tap
                 // on another screen, and this screen follows it.
                 guard smoothScroll else { return }
-                manualOffset = 0
-                recalculateTracking(containerHeight: containerHeight)
+                if isFollowingPeek {
+                    endFollowedSmoothPeek()
+                } else {
+                    manualOffset = 0
+                    recalculateTracking(containerHeight: containerHeight)
+                }
+                handlePeekEvent(.smoothProgressMoved)
             }
             .onChange(of: isListening) { _, listening in
                 // Pause and resume cancel a pending peek glide back. A paused
@@ -289,8 +309,17 @@ struct SpeechScrollView: View {
                 peekResetGeneration += 1
                 if listening {
                     manualOffset = 0
+                    isFollowingPeek = false
+                }
+                // Resume ends the look-around on every screen. Pause keeps
+                // it, as it keeps it on this screen.
+                handlePeekEvent(.listeningChanged, isListening: listening)
+                if listening {
                     recalculateTracking(containerHeight: containerHeight)
                 }
+            }
+            .onChange(of: sharedProgress?.peek) { _, _ in
+                followSharedPeek()
             }
             .onChange(of: words) { _, _ in
                 scrollOffset = initialScrollOffset(containerHeight: containerHeight)
@@ -336,6 +365,15 @@ struct SpeechScrollView: View {
             }
             .onAppear {
                 containerHeight = geo.size.height
+                // A screen that opens, or is rebuilt, during a look-around on
+                // another screen shows the shared word at once. onChange of
+                // the peek does not run for a value that is already set.
+                defer {
+                    if let peek = sharedProgress?.peek, peek.source != peekSourceID {
+                        if layoutWidth == 0 { layoutWidth = geo.size.width }
+                        applyFollowerPeek(peek)
+                    }
+                }
                 // A live view made mid-script (for example when the page
                 // picker closes) shows the highlighted line, not the top. The
                 // first preference change ran before this with no height, so
@@ -359,6 +397,7 @@ struct SpeechScrollView: View {
                     isUserScrolling = false
                     onManualScroll?(false, smoothWordProgress)
                 }
+                handlePeekEvent(.disappear)
             }
             .overlay(
                 ScrollWheelView(
@@ -399,17 +438,18 @@ struct SpeechScrollView: View {
                         } else {
                             manualOffset = newOffset
                         }
+                        publishSharedPeek()
                     },
                     onScrollEnd: {
                         if smoothScroll && isUserScrolling {
                             isUserScrolling = false
-                            if Self.smoothReleaseKeepsWord(
-                                manualOffset: manualOffset,
-                                minimumMove: minimumPeekOffset,
-                                readY: releaseReadLineY() - (scrollOffset + manualOffset),
-                                wordY: layoutY(forWordProgress: smoothWordProgress),
-                                rowAdvance: WordFlowLayout.rowHeight(for: font) + WordFlowLayout.lineSpacing(for: font)
-                            ) {
+                            // A late end after another screen took over the
+                            // scroll: that screen now owns the hold and the
+                            // look-around, and this one follows it.
+                            let peekEnd = peekDecision(.scrollEnded)
+                            if peekEnd.skipsRelease { return }
+                            defer { applyPeekDecision(peekEnd) }
+                            if scrollKeepsCurrentWord() {
                                 // A release that stays near the line of the
                                 // word keeps the word. A read from a line gives
                                 // its first word, so the shared word would go
@@ -455,6 +495,7 @@ struct SpeechScrollView: View {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                                     manualOffset = min(bounds.upper, max(bounds.lower, manualOffset))
                                 }
+                                publishSharedPeek()
                             }
                         }
                     }
@@ -521,21 +562,282 @@ struct SpeechScrollView: View {
     /// peekResetGeneration, and that cancels this timer.
     private func schedulePeekGlideBack() {
         let generation = peekResetGeneration
+        // Captured now: after a page rebuild this copy's state can be stale.
+        let source = peekSourceID
+        let shared = sharedProgress
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             // Read only @State here. The plain properties of this copy still
             // hold their values from when the timer started.
             guard generation == peekResetGeneration else { return }
-            // Only the lines near the tracked line are rendered at the end, so
-            // a longer glide would pass through empty space. Jump instead.
-            let glide: Animation? = abs(manualOffset) <= wordFlowCullingBuffer
-                ? .easeInOut(duration: 0.4)
-                : nil
-            var transaction = Transaction(animation: glide)
-            // Keep the implicit 0.15 s manualOffset animation from replacing it.
+            // The other screens glide back with this one. The timer runs
+            // only in live Word Tracking.
+            let decision = Self.peekDecision(
+                .glideBackTimer,
+                owner: Self.peekOwner(source: shared?.peek?.source, this: source),
+                smoothScroll: false,
+                isListening: true,
+                isFollowing: isFollowingPeek,
+                manualOffset: manualOffset
+            )
+            applyPeekMove(decision.move, peek: shared?.peek)
+            applyPeekClear(decision.clear, to: shared, source: source)
+        }
+    }
+
+    /// Word tracking: end a look-around. Glide back to the tracked line.
+    private func glideBackToTrackedLine() {
+        isFollowingPeek = false
+        // Only the lines near the tracked line are rendered at the end, so
+        // a longer glide would pass through empty space. Jump instead.
+        let glide: Animation? = abs(manualOffset) <= wordFlowCullingBuffer
+            ? .easeInOut(duration: 0.4)
+            : nil
+        var transaction = Transaction(animation: glide)
+        // Keep the implicit 0.15 s manualOffset animation from replacing it.
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            manualOffset = 0
+        }
+    }
+
+    // MARK: Shared look-around scroll
+
+    /// The word progress that a scroll on this screen shares: the word at
+    /// the reading line, or the current word after a move too small to leave
+    /// its line. A smooth-mode release writes the same value.
+    private func scrollReadProgress() -> Double {
+        scrollKeepsCurrentWord() ? currentScrollWord : wordProgressAtCurrentOffset()
+    }
+
+    /// The word that tracking puts at the reading line.
+    private var currentScrollWord: Double {
+        smoothScroll ? smoothWordProgress : Double(activeWordIndex())
+    }
+
+    private func scrollKeepsCurrentWord() -> Bool {
+        Self.smoothReleaseKeepsWord(
+            manualOffset: manualOffset,
+            minimumMove: minimumPeekOffset,
+            readY: releaseReadLineY() - (scrollOffset + manualOffset),
+            wordY: layoutY(forWordProgress: currentScrollWord),
+            rowAdvance: WordFlowLayout.rowHeight(for: font) + WordFlowLayout.lineSpacing(for: font)
+        )
+    }
+
+    /// This screen was scrolled: share the word at its reading line.
+    private func publishSharedPeek() {
+        guard let sharedProgress else { return }
+        isFollowingPeek = false
+        sharedProgress.publishPeek(scrollReadProgress(), from: peekSourceID)
+    }
+
+    /// The shared look-around changed. A look-around from another screen
+    /// puts its word at this screen's reading line. When it ends, every
+    /// screen goes back to its tracked position.
+    private func followSharedPeek() {
+        let decision = peekDecision(.sharedChanged)
+        // Never follow the echo of this screen's own scroll.
+        guard decision.move != .none else { return }
+        // This cancels a pending glide back of this screen.
+        peekResetGeneration += 1
+        applyPeekDecision(decision)
+    }
+
+    /// Put the shared word at this screen's reading line, inside the scroll
+    /// bounds. The bounds come from the line layout, so a culled line does
+    /// not limit a long move.
+    private func applyFollowerPeek(_ peek: SharedScrollProgress.Peek) {
+        guard let wordY = layoutY(forWordProgress: peek.wordProgress) else { return }
+        let bounds = Self.manualOffsetBounds(
+            scrollOffset: scrollOffset,
+            topOffset: initialScrollOffset(containerHeight: containerHeight),
+            maxWordY: trackingWordY(words.count - 1) ?? wordYPositions.values.max() ?? 0,
+            containerHeight: containerHeight
+        )
+        let offset = Self.followerPeekOffset(
+            readLineY: releaseReadLineY(),
+            wordY: wordY,
+            scrollOffset: scrollOffset,
+            lower: bounds.lower,
+            upper: bounds.upper
+        )
+        isFollowingPeek = true
+        guard offset != manualOffset else { return }
+        if abs(offset - manualOffset) > wordFlowCullingBuffer {
+            // Only the lines near the target are rendered, so a glide this
+            // long would pass through empty space. Jump instead.
+            var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                manualOffset = 0
+                manualOffset = offset
             }
+        } else {
+            manualOffset = offset
+        }
+    }
+
+    /// Classic and Voice-Activated follower: the look-around ended. The text
+    /// already shows the shared word at the reading line, so move to the
+    /// tracked position without animation. Two animations on one offset
+    /// would add up and jolt the text.
+    private func endFollowedSmoothPeek() {
+        isFollowingPeek = false
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollOffset += manualOffset
+            manualOffset = 0
+            allowsNextBackwardTrackingUpdate = true
+            recalculateTracking(containerHeight: containerHeight)
+        }
+    }
+
+    /// The manualOffset that puts a word at layout Y `wordY` on the read line
+    /// `readLineY` of a view with base offset `scrollOffset`, inside the
+    /// bounds of manualOffsetBounds.
+    static func followerPeekOffset(
+        readLineY: CGFloat,
+        wordY: CGFloat,
+        scrollOffset: CGFloat,
+        lower: CGFloat,
+        upper: CGFloat
+    ) -> CGFloat {
+        min(upper, max(lower, readLineY - wordY - scrollOffset))
+    }
+
+    /// Who started the shared look-around, seen from one screen.
+    enum PeekOwner { case none, this, other }
+
+    static func peekOwner(source: UUID?, this: UUID) -> PeekOwner {
+        guard let source else { return .none }
+        return source == this ? .this : .other
+    }
+
+    /// An event at which a screen can follow or end the shared look-around.
+    enum PeekEvent {
+        /// A tap on a word of this screen.
+        case tap
+        /// Word Tracking moved the highlight. Live: after this screen
+        /// tracked it (a nudge offset is already 0). Paused: a deliberate move.
+        case highlightMoved
+        /// Classic or Voice-Activated moved the shared word progress.
+        case smoothProgressMoved
+        /// Resume (isListening true) or pause (false).
+        case listeningChanged
+        /// A Classic or Voice-Activated scroll on this screen ended.
+        case scrollEnded
+        /// The 6 s Word Tracking glide-back timer of this screen fired.
+        case glideBackTimer
+        /// This screen goes away.
+        case disappear
+        /// The shared look-around changed.
+        case sharedChanged
+    }
+
+    /// What one screen does with the shared look-around at a PeekEvent.
+    struct PeekDecision: Equatable {
+        /// keep: leave it. all: end it on every screen. own: end it only
+        /// when this screen is its source (a late end changes nothing).
+        enum Clear { case keep, all, own }
+        enum Move {
+            case none
+            /// Put the shared word at this screen's reading line.
+            case follow
+            /// Word Tracking: glide back to the tracked line.
+            case glideBack
+            /// Classic/Voice-Activated follower: fold the followed offset into
+            /// the base offset without animation.
+            case foldFollowed
+            /// Classic/Voice-Activated: drop the scroll offset.
+            case reset
+        }
+        var clear: Clear = .keep
+        var move: Move = .none
+        /// Another screen took over the scroll: skip this screen's release.
+        var skipsRelease = false
+    }
+
+    /// The shared look-around rules of one screen. `manualOffset` is the
+    /// offset after the event's own local change.
+    static func peekDecision(
+        _ event: PeekEvent,
+        owner: PeekOwner,
+        smoothScroll: Bool,
+        isListening: Bool,
+        isFollowing: Bool,
+        manualOffset: CGFloat
+    ) -> PeekDecision {
+        switch event {
+        case .tap:
+            return PeekDecision(clear: .all)
+        case .highlightMoved:
+            guard !smoothScroll else { return PeekDecision() }
+            guard isListening else { return PeekDecision(clear: .all) }
+            switch owner {
+            case .other: return PeekDecision(move: .follow)
+            // The next word ended this screen's nudge: end it everywhere.
+            case .this: return manualOffset == 0 ? PeekDecision(clear: .own) : PeekDecision()
+            case .none: return PeekDecision()
+            }
+        case .smoothProgressMoved:
+            return smoothScroll && owner == .other ? PeekDecision(move: .follow) : PeekDecision()
+        case .listeningChanged:
+            return isListening ? PeekDecision(clear: .all) : PeekDecision()
+        case .scrollEnded:
+            guard smoothScroll else { return PeekDecision() }
+            return owner == .other ? PeekDecision(skipsRelease: true) : PeekDecision(clear: .own)
+        case .glideBackTimer:
+            return PeekDecision(clear: .own, move: .glideBack)
+        case .disappear:
+            return PeekDecision(clear: .own)
+        case .sharedChanged:
+            switch owner {
+            case .other: return PeekDecision(move: .follow)
+            case .this: return PeekDecision()
+            case .none:
+                if !smoothScroll { return PeekDecision(move: .glideBack) }
+                return PeekDecision(move: isFollowing ? .foldFollowed : .reset)
+            }
+        }
+    }
+
+    private func peekDecision(_ event: PeekEvent, isListening listening: Bool? = nil) -> PeekDecision {
+        Self.peekDecision(
+            event,
+            owner: Self.peekOwner(source: sharedProgress?.peek?.source, this: peekSourceID),
+            smoothScroll: smoothScroll,
+            isListening: listening ?? isListening,
+            isFollowing: isFollowingPeek,
+            manualOffset: manualOffset
+        )
+    }
+
+    private func applyPeekDecision(_ decision: PeekDecision) {
+        applyPeekMove(decision.move, peek: sharedProgress?.peek)
+        applyPeekClear(decision.clear, to: sharedProgress, source: peekSourceID)
+    }
+
+    private func handlePeekEvent(_ event: PeekEvent, isListening listening: Bool? = nil) {
+        applyPeekDecision(peekDecision(event, isListening: listening))
+    }
+
+    private func applyPeekMove(_ move: PeekDecision.Move, peek: SharedScrollProgress.Peek?) {
+        switch move {
+        case .none: break
+        case .follow: if let peek { applyFollowerPeek(peek) }
+        case .glideBack: glideBackToTrackedLine()
+        case .foldFollowed: endFollowedSmoothPeek()
+        case .reset:
+            isFollowingPeek = false
+            manualOffset = 0
+        }
+    }
+
+    private func applyPeekClear(_ clear: PeekDecision.Clear, to shared: SharedScrollProgress?, source: UUID) {
+        switch clear {
+        case .keep: break
+        case .all: shared?.clearPeek()
+        case .own: shared?.clearPeek(from: source)
         }
     }
 

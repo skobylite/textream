@@ -264,7 +264,8 @@ struct ExternalDisplayView: View {
                     readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
                     ? content.paragraphBreakBeforeWordIndices
-                    : []
+                    : [],
+                sharedProgress: scrollProgress
             )
             .id(content.currentPageIndex)
             .padding(.horizontal, hPad)

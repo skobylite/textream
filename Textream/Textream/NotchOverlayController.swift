@@ -951,7 +951,8 @@ struct NotchOverlayView: View {
                 readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
                     ? content.paragraphBreakBeforeWordIndices
-                    : []
+                    : [],
+                sharedProgress: scrollProgress
             )
             .id(content.currentPageIndex)
             .padding(.horizontal, 12)
@@ -1444,7 +1445,8 @@ struct FloatingOverlayView: View {
                 readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
                     ? content.paragraphBreakBeforeWordIndices
-                    : []
+                    : [],
+                sharedProgress: scrollProgress
             )
             .id(content.currentPageIndex)
             .padding(.horizontal, 16)

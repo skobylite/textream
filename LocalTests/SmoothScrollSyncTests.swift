@@ -1,11 +1,12 @@
 // extract: Textream/Textream/SharedScrollProgress.swift ScrollProgressMath charOffset wordProgress shouldAdvance tickStep
-// extract: Textream/Textream/MarqueeTextView.swift Scroll readingLineY smoothReadingAnchor smoothCenteredTarget smoothReadLineY wordProgress smoothReleaseKeepsWord smoothLayoutY perWordMidYs ScrollEndTiming scrollEndTiming
+// extract: Textream/Textream/MarqueeTextView.swift Scroll readingLineY smoothReadingAnchor smoothCenteredTarget smoothReadLineY wordProgress smoothReleaseKeepsWord smoothLayoutY perWordMidYs ScrollEndTiming scrollEndTiming followerPeekOffset manualOffsetBounds PeekOwner peekOwner PeekEvent PeekDecision peekDecision
 // Regression tests for the shared Classic/Voice-Activated reading position
 // (SharedScrollProgress) and the smooth-scroll reading line (SpeechScrollView).
 import Foundation
 
-// extract.py copies no imports. This makes CGFloat visible to the extracted code.
+// extract.py copies no imports. This makes CGFloat and UUID visible to the extracted code.
 typealias CGFloat = Foundation.CGFloat
+typealias UUID = Foundation.UUID
 
 /// AppKit's NSEvent.Phase, with the same raw values, for
 /// ScrollWheelNSView.scrollEndTiming. The test does not link AppKit.
@@ -313,6 +314,146 @@ check("a 10 px wheel release on the floating window keeps the word", released(27
 check("a 20 px release on the External keeps the word", released(36.25, by: 20, externalRows, rowAdvance: 123) == 36.25)
 check("a -120 px release on the External (steal) reads a word of the next line",
       lineY(released(29.57, by: -120, externalRows, rowAdvance: 123), externalRows) > lineY(29.57, externalRows))
+
+// MARK: The shared look-around scroll (one screen scrolled, the other follows)
+
+/// The follower's offset for shared word `p`, as applyFollowerPeek computes
+/// it: the word at the read line, inside the real manualOffsetBounds.
+func followerOffset(_ p: Double, _ positions: [(Int, CGFloat)], line: CGFloat, base: CGFloat,
+                    top: CGFloat, height: CGFloat) -> CGFloat {
+    let bounds = Scroll.manualOffsetBounds(scrollOffset: base, topOffset: top,
+                                           maxWordY: positions.last!.1, containerHeight: height)
+    return Scroll.followerPeekOffset(readLineY: line, wordY: y(p, positions), scrollOffset: base,
+                                     lower: bounds.lower, upper: bounds.upper)
+}
+// Source: the floating window (102 pt, 5 words a row, 32 pt rows). Follower:
+// the External (968 pt, 6 words a row, 123 pt rows). Both track word 30.
+let srcH: CGFloat = 102, srcTop: CGFloat = 37
+let srcLine = Scroll.smoothReadingAnchor(containerHeight: srcH)
+let extLine = Scroll.smoothReadingAnchor(containerHeight: h)
+let src = layout(perRow: 5, rowHeight: 32, words: 60)
+let srcBase = Scroll.smoothCenteredTarget(anchor: srcLine, wordY: y(30, src), topOffset: srcTop)
+let extBase = Scroll.smoothCenteredTarget(anchor: extLine, wordY: y(30, externalRows), topOffset: top)
+for d: CGFloat in [-250, -96, -40, 40, 96, 250] {
+    // The source reads the word at its reading line; the follower puts that
+    // word at its own reading line.
+    let shared = read(srcLine - (srcBase + d), src)
+    let off = followerOffset(shared, externalRows, line: extLine, base: extBase, top: top, height: h)
+    // A word of the first rows cannot reach the reading line: the follower
+    // then stops at the start offset, as tracking does (the start clamp).
+    let atLine = near(Double(y(shared, externalRows) + extBase + off), Double(extLine))
+    let atTop = extBase + off == top
+    check("a \(Int(d)) px scroll on the floating window puts word \(shared) at the External's reading line"
+              + (atTop ? " (held at the start offset)" : ""),
+          atLine || (atTop && extLine - y(shared, externalRows) > top))
+    // The release writes the same word, and tracking then puts it at the
+    // same place: the follower does not move at the release.
+    check("after a \(Int(d)) px peek, the release moves the External by less than 0.5 pt",
+          abs(Scroll.smoothCenteredTarget(anchor: extLine, wordY: y(shared, externalRows), topOffset: top)
+              - (extBase + off)) < 0.5)
+}
+check("a follower for the word it already tracks does not move",
+      followerOffset(30, externalRows, line: extLine, base: extBase, top: top, height: h) == 0)
+check("a follower never scrolls above the top of the script",
+      followerOffset(0, externalRows, line: extLine, base: extBase, top: top, height: h) == top - extBase)
+let lastBounds = Scroll.manualOffsetBounds(scrollOffset: extBase, topOffset: top,
+                                           maxWordY: externalRows.last!.1, containerHeight: h)
+check("a follower never scrolls past the last word",
+      followerOffset(1000, externalRows, line: extLine, base: extBase, top: top, height: h) >= lastBounds.lower)
+// Word Tracking: the line is h/2 and the base puts the tracked word there.
+let wtBase = h / 2 - y(30, externalRows)
+check("Word Tracking: the follower puts word 50 at h/2",
+      near(Double(y(50, externalRows) + wtBase
+                  + followerOffset(50, externalRows, line: h / 2, base: wtBase, top: top, height: h)), Double(h / 2)))
+// During the start clamp the read line is where the current word is on
+// screen (smoothReadLineY), so a follower for its current word stays still.
+let clampBase = Scroll.smoothCenteredTarget(anchor: extLine, wordY: y(4.5, externalRows), topOffset: top)
+let clampLine = Scroll.smoothReadLineY(anchor: extLine, wordY: y(4.5, externalRows), topOffset: top)
+check("during the start clamp a follower for its current word does not move",
+      followerOffset(4.5, externalRows, line: clampLine, base: clampBase, top: top, height: h) == 0)
+
+// MARK: Which events follow or end the shared look-around on one screen
+
+typealias Peek = Scroll.PeekDecision
+/// The rule of one screen. Modes: wt (live Word Tracking), wtPaused,
+/// smooth (Classic or Voice-Activated).
+enum Mode: CaseIterable { case wt, wtPaused, smooth }
+func peekRule(_ event: Scroll.PeekEvent, _ owner: Scroll.PeekOwner, _ mode: Mode,
+              listening: Bool? = nil, following: Bool = false, offset: CGFloat = 0) -> Peek {
+    Scroll.peekDecision(event, owner: owner, smoothScroll: mode == .smooth,
+                        isListening: listening ?? (mode != .wtPaused),
+                        isFollowing: following, manualOffset: offset)
+}
+let owners: [Scroll.PeekOwner] = [.none, .this, .other]
+let thisScreen = UUID(), otherScreen = UUID()
+check("the owner of no look-around is none", Scroll.peekOwner(source: nil, this: thisScreen) == .none)
+check("this screen's own scroll is its own (an echo)", Scroll.peekOwner(source: thisScreen, this: thisScreen) == .this)
+check("a scroll on another screen is another owner", Scroll.peekOwner(source: otherScreen, this: thisScreen) == .other)
+
+check("a tap ends the look-around on every screen, in every mode, whoever scrolled",
+      Mode.allCases.allSatisfy { m in owners.allSatisfy { peekRule(.tap, $0, m) == Peek(clear: .all) } })
+check("live Word Tracking: the next word ends this screen's nudge on every screen (M11)",
+      peekRule(.highlightMoved, .this, .wt, offset: 0) == Peek(clear: .own))
+check("live Word Tracking: a word during this screen's peek keeps it",
+      peekRule(.highlightMoved, .this, .wt, offset: 120) == Peek())
+check("live Word Tracking: a follower puts the shared word back at its line after each word",
+      peekRule(.highlightMoved, .other, .wt) == Peek(move: .follow))
+check("live Word Tracking: a word with no look-around changes nothing",
+      peekRule(.highlightMoved, .none, .wt) == Peek())
+check("paused Word Tracking: a deliberate highlight move ends the look-around everywhere",
+      owners.allSatisfy { peekRule(.highlightMoved, $0, .wtPaused) == Peek(clear: .all) })
+check("Classic and Voice-Activated: the highlight does not change the look-around",
+      owners.allSatisfy { peekRule(.highlightMoved, $0, .smooth) == Peek() })
+check("Classic and Voice-Activated: a follower follows the shared word after the clock moves",
+      peekRule(.smoothProgressMoved, .other, .smooth) == Peek(move: .follow)
+          && peekRule(.smoothProgressMoved, .this, .smooth) == Peek()
+          && peekRule(.smoothProgressMoved, .none, .smooth) == Peek())
+check("resume ends the look-around on every screen",
+      Mode.allCases.allSatisfy { m in owners.allSatisfy {
+          peekRule(.listeningChanged, $0, m, listening: true) == Peek(clear: .all) } })
+check("pause keeps the look-around (M8)",
+      Mode.allCases.allSatisfy { m in owners.allSatisfy {
+          peekRule(.listeningChanged, $0, m, listening: false) == Peek() } })
+check("a smooth release ends this screen's look-around on every screen",
+      peekRule(.scrollEnded, .this, .smooth) == Peek(clear: .own)
+          && peekRule(.scrollEnded, .none, .smooth) == Peek(clear: .own))
+check("a late end after another screen took over the scroll skips the release and keeps its look-around (M9)",
+      peekRule(.scrollEnded, .other, .smooth) == Peek(skipsRelease: true))
+check("the Word Tracking glide back ends this screen's look-around on every screen (M14)",
+      owners.allSatisfy { peekRule(.glideBackTimer, $0, .wt) == Peek(clear: .own, move: .glideBack) })
+check("a screen that goes away ends only its own look-around",
+      Mode.allCases.allSatisfy { m in owners.allSatisfy { peekRule(.disappear, $0, m) == Peek(clear: .own) } })
+check("a scroll on another screen is followed in every mode",
+      Mode.allCases.allSatisfy { peekRule(.sharedChanged, .other, $0) == Peek(move: .follow) })
+check("a screen never follows the echo of its own scroll (M6)",
+      Mode.allCases.allSatisfy { peekRule(.sharedChanged, .this, $0) == Peek() })
+check("Word Tracking: the end of the look-around glides back to the tracked line",
+      peekRule(.sharedChanged, .none, .wt) == Peek(move: .glideBack)
+          && peekRule(.sharedChanged, .none, .wtPaused) == Peek(move: .glideBack))
+check("Classic and Voice-Activated: a follower folds its offset in at the end, without a jolt",
+      peekRule(.sharedChanged, .none, .smooth, following: true) == Peek(move: .foldFollowed))
+check("Classic and Voice-Activated: the source drops its offset at the end",
+      peekRule(.sharedChanged, .none, .smooth, following: false) == Peek(move: .reset))
+
+// Two screens through the rules: the source peeks, the follower follows,
+// and each end reaches both screens.
+func endsBothScreens(_ event: Scroll.PeekEvent, _ mode: Mode, offset: CGFloat = 0) -> Bool {
+    var shared: UUID? = thisScreen  // the source published a peek
+    let followerSees = Scroll.peekOwner(source: shared, this: otherScreen)
+    guard peekRule(.sharedChanged, followerSees, mode) == Peek(move: .follow) else { return false }
+    let d = peekRule(event, Scroll.peekOwner(source: shared, this: thisScreen), mode, offset: offset)
+    switch d.clear {
+    case .keep: break
+    case .all: shared = nil
+    case .own: if shared == thisScreen { shared = nil }
+    }
+    let end = peekRule(.sharedChanged, Scroll.peekOwner(source: shared, this: otherScreen), mode)
+    return shared == nil && end.move != .follow && end.move != .none
+}
+check("a tap on the source ends the follower's look-around too (M7)", endsBothScreens(.tap, .wt))
+check("the end of a nudge on the source ends the follower's look-around too", endsBothScreens(.highlightMoved, .wt))
+check("the source's glide back glides the follower back too", endsBothScreens(.glideBackTimer, .wt))
+check("a Classic release on the source ends the follower's look-around too", endsBothScreens(.scrollEnded, .smooth))
 
 // MARK: When a scroll event ends the scroll
 

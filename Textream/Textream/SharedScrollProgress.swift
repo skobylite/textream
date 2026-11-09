@@ -102,6 +102,37 @@ final class SharedScrollProgress {
 
     var isUserScrolling: Bool { holdOwner != nil }
 
+    /// A look-around scroll on one screen, as a word position: the word at
+    /// the reading line of the screen that is scrolled (`source`). The other
+    /// screens put the same word at their own reading line.
+    struct Peek: Equatable {
+        var wordProgress: Double
+        var source: UUID
+    }
+
+    /// The active look-around scroll, or nil. It changes on every scroll
+    /// event: read it only in SpeechScrollView's onChange(of:). A host view
+    /// that reads it in its body re-renders the whole overlay on each event.
+    private(set) var peek: Peek?
+
+    /// Screen `source` is scrolled to word `wordProgress`.
+    func publishPeek(_ wordProgress: Double, from source: UUID) {
+        let new = Peek(wordProgress: wordProgress, source: source)
+        if peek != new { peek = new }
+    }
+
+    /// The look-around ends on every screen (a tap, a resume, a page turn).
+    func clearPeek() {
+        if peek != nil { peek = nil }
+    }
+
+    /// The look-around of screen `source` ends. A late end from a screen
+    /// that is no longer the source (another screen was scrolled since)
+    /// changes nothing.
+    func clearPeek(from source: UUID) {
+        if peek?.source == source { peek = nil }
+    }
+
     /// A smooth-mode scroll on screen `owner` holds the clock.
     func beginHold(by owner: UUID) {
         if holdOwner != owner { holdOwner = owner }
@@ -125,6 +156,7 @@ final class SharedScrollProgress {
     func resetForNewPage() {
         wordProgress = 0
         holdOwner = nil
+        peek = nil
     }
 
     func resetForNewSession() {
