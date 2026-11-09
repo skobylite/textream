@@ -14,6 +14,8 @@ import Foundation
 /// - Move: a change of the highlight after a result. Forward moves less
 ///   than `burstSeconds` apart count as one move, because results can come
 ///   in bursts (the macOS 26 model sends several within a few ms).
+/// - Words of a move: the spoken words that the highlight passes (see
+///   `wordEnds`). The words of [bracket] notes do not count.
 /// - Speaking time: the time that the voice detector reports speech, added
 ///   up from its level updates (20 a second).
 /// - Wait: the speaking time between two highlight moves. The time from the
@@ -235,21 +237,29 @@ struct SpeechTimingLog {
         return same * 2 < old.count
     }
 
-    /// The char offsets where the words of `text` end.
+    /// The char offsets where the spoken words of `text` end. A spoken word
+    /// has a letter or digit outside the [bracket] notes, as
+    /// SpeechTextAlignment.annotationRanges finds them. The matcher skips the
+    /// notes and the marks with no letter or digit, such as a lone dash. So a
+    /// move counts only the words that the reader says.
     static func wordEnds(in text: String) -> [Int] {
+        let notes = SpeechTextAlignment.annotationRanges(in: text)
         var ends: [Int] = []
-        var inWord = false
+        // True when the word so far has a letter or digit outside the notes.
+        var spoken = false
+        var note = 0
         var offset = 0
         for character in text {
             if character.isWhitespace {
-                if inWord { ends.append(offset) }
-                inWord = false
-            } else {
-                inWord = true
+                if spoken { ends.append(offset) }
+                spoken = false
+            } else if character.isLetter || character.isNumber {
+                while note < notes.count && notes[note].upperBound <= offset { note += 1 }
+                if !(note < notes.count && notes[note].contains(offset)) { spoken = true }
             }
             offset += 1
         }
-        if inWord { ends.append(offset) }
+        if spoken { ends.append(offset) }
         return ends
     }
 

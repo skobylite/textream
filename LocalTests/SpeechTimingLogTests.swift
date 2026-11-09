@@ -1,4 +1,5 @@
 // include: Textream/Textream/SpeechTimingLog.swift
+// include: Textream/Textream/SpeechTextAlignment.swift
 // include: Textream/Textream/VoiceActivityDetector.swift
 // Tests for the summary numbers of the speech timing log (SpeechTimingLog).
 // Made-up sessions: voice detector updates 20 times a second, highlight
@@ -250,6 +251,58 @@ log.setText("one two six ten")                                       // word end
 log.move(from: 0, to: 12, voiceActive: true, at: 1)
 line = log.summary(at: 2, SpeechTimingLog.Context())
 check("a text edit counts words in the new text", value("wordsPerMoveMed", line) == "3.0")
+
+// [Bracket] notes: the reader does not say them, and the highlight skips
+// them. A move counts only the words that the reader says.
+check("the words of a note are not words", SpeechTimingLog.wordEnds(in: "say [look up] this") == [3, 18])
+check("a word with a note at its end is a word", SpeechTimingLog.wordEnds(in: "great![laugh] on") == [13, 16])
+check("a word after a note in the same token is a word", SpeechTimingLog.wordEnds(in: "[a]b c") == [4, 6])
+check("a mark after a note is not a word", SpeechTimingLog.wordEnds(in: "[look at me]. Next") == [18])
+check("a lone dash is not a word", SpeechTimingLog.wordEnds(in: "one - two") == [3, 9])
+check("a bracket that does not close is no note", SpeechTimingLog.wordEnds(in: "[not a note") == [4, 6, 11])
+
+/// A made-up reading of 12 paragraphs of 24 words, with or without a note
+/// of 5 words after each paragraph. Each move passes 1 to 3 spoken words,
+/// 0.6 s apart. After the last word of a paragraph, the highlight lands past
+/// the note, as SpeechRecognizer puts it (advancePastAnnotations).
+func noteReading(notes: Bool) -> (log: SpeechTimingLog, line: String) {
+    var tokens: [(text: String, spoken: Bool)] = []
+    for p in 0..<12 {
+        tokens += (0..<24).map { ("p\(p)w\($0)", true) }
+        if notes { tokens += ["[look", "at", "the", "camera", "now]"].map { ($0, false) } }
+    }
+    let script = tokens.map(\.text).joined(separator: " ")
+    let ranges = SpeechTextAlignment.annotationRanges(in: script)
+    var spokenEnds: [Int] = []
+    var offset = 0
+    for token in tokens {
+        offset += token.text.count
+        if token.spoken { spokenEnds.append(offset) }
+        offset += 1
+    }
+    var log = SpeechTimingLog(text: script, at: 0)
+    var from = 0, said = 0, step = 0, time = 0.0
+    while said < spokenEnds.count {
+        said = min(spokenEnds.count, said + [1, 2, 3, 2, 1, 2][step % 6])
+        step += 1
+        let to = SpeechTextAlignment.advancePastAnnotations(
+            in: script, ranges: ranges, from: min(spokenEnds[said - 1] + 1, script.count))
+        speak(&log, time, time + 0.6)
+        time += 0.6
+        log.move(from: from, to: to, voiceActive: true, at: time)
+        from = to
+    }
+    return (log, log.summary(at: time, SpeechTimingLog.Context()))
+}
+let plain = noteReading(notes: false), noted = noteReading(notes: true)
+check("the reading without notes has no big moves", value("bigMoveShare", plain.line) == "0.000"
+      && value("wordsPerMoveMed", plain.line) == "2.0")
+check("notes after each paragraph add no moves", value("moves", noted.line) == value("moves", plain.line))
+check("notes after each paragraph add no words to a move", noted.log.forwardWords == plain.log.forwardWords)
+check("notes after each paragraph give the same share of big moves",
+      value("bigMoveShare", noted.line) == value("bigMoveShare", plain.line))
+check("notes after each paragraph give the same words per move",
+      value("wordsPerMoveMed", noted.line) == value("wordsPerMoveMed", plain.line))
 
 print(fails == 0 ? "all pass" : "\(fails) FAILED")
 exit(fails == 0 ? 0 : 1)
