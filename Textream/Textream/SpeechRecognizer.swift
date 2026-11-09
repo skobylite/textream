@@ -133,6 +133,8 @@ class SpeechRecognizer {
     private var suppressConfigChange: Bool = false
     private var requestLock = NSLock()
     private var preemptiveRestartTimer: Timer?
+    /// The macOS 26 model only: checks every 3 s that the audio still runs.
+    @ObservationIgnored private var audioWatchTimer: Timer?
     /// Sliding window of recent match positions for confidence gating.
     /// We require 2-of-3 recent results to agree before committing a forward jump.
     private var recentMatchPositions: [Int] = []
@@ -410,6 +412,8 @@ class SpeechRecognizer {
         pendingRestart = nil
 
         stopPreemptiveTimer()
+        audioWatchTimer?.invalidate()
+        audioWatchTimer = nil
 
         if let observer = configurationChangeObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -743,6 +747,8 @@ class SpeechRecognizer {
             if Self.timingLogOn { timing?.ready(at: ProcessInfo.processInfo.systemUptime) }
             if requiresSpeechRecognition && model == nil && !onDeviceRecognition {
                 startPreemptiveTimer()
+            } else if model != nil {
+                startAudioWatch()
             }
         } catch {
             // Transient failure after a device switch — retry with longer delay
@@ -932,6 +938,21 @@ class SpeechRecognizer {
     private func stopPreemptiveTimer() {
         preemptiveRestartTimer?.invalidate()
         preemptiveRestartTimer = nil
+    }
+
+    /// The macOS 26 model has no 55 s restart. When its audio stops without a
+    /// handled configuration change, the model gets no audio and sends no
+    /// results. Then start recognition again, as a tap does in that case. A
+    /// fallback to today's engine would not fix the audio.
+    private func startAudioWatch() {
+        audioWatchTimer?.invalidate()
+        let generation = sessionGeneration
+        audioWatchTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self, self.sessionGeneration == generation, self.shouldListen,
+                  self.isListening, self.speechModel != nil, !self.audioEngine.isRunning else { return }
+            Self.engineLogger.notice("The audio stopped, so recognition starts again")
+            self.restartRecognition(resetRetryCount: false)
+        }
     }
 
     // MARK: - Speech timing log (numbers only, off by default)
