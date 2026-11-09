@@ -205,9 +205,13 @@ struct SpeechScrollView: View {
     /// The offset that the text shows now (scrollOffset + manualOffset as
     /// SwiftUI animates it).
     @State private var shownOffset = ShownOffset()
-    /// Word Tracking: the system uptime of the last quick glide (a tap, a
-    /// re-read, a catch-up or a glide back). See trackingMove.
+    /// Word Tracking: the system uptime of the last quick glide for its own
+    /// reason (a tap, a re-read, a catch-up or a glide back). A settle
+    /// glide does not change it. See trackingMove.
     @State private var lastQuickGlide: TimeInterval = -.infinity
+    /// Word Tracking: true while the last glide of the base used the quick
+    /// spring.
+    @State private var lastGlideWasQuick = false
 
     private var readingPositionTransitionAnimation: Animation? {
         guard let duration = readingPositionTransitionDuration, duration > 0 else {
@@ -1083,9 +1087,22 @@ struct SpeechScrollView: View {
     static let quickSpringResponse: Double = 0.5
 
     /// Word Tracking: a reading step this soon (in seconds) after a quick
-    /// glide is quick too. A slow spring that takes over a fast glide keeps
-    /// its speed, so it would carry the text past the target and back.
+    /// glide for its own reason or a glide back is quick too: a settle
+    /// glide. A slow spring that takes over a fast glide keeps its speed,
+    /// so it would carry the text past the target and back. A settle glide
+    /// does not start this time again.
     static let quickGlideSettle: Double = 0.8
+
+    /// Word Tracking: true when a quick glide that still has `left` to go
+    /// is too fast for the reading spring to take over a step of `step`.
+    /// The spring that takes over keeps the speed of the glide. A quick
+    /// glide moves at less than 2π / quickSpringResponse times the distance
+    /// that it has left. So when it has at most a sixth of the step left
+    /// (quickSpringResponse / (readingSpringResponse - quickSpringResponse)),
+    /// the reading spring does not carry the text past the new target.
+    static func quickGlideTooFast(left: CGFloat, step: CGFloat) -> Bool {
+        left * CGFloat(readingSpringResponse - quickSpringResponse) > step * CGFloat(quickSpringResponse)
+    }
 
     /// Word Tracking: a forward step of more words than this is not one
     /// result of normal reading (results bring 1 to 5 words). It is a
@@ -1170,6 +1187,10 @@ struct SpeechScrollView: View {
         case readingGlide
         /// Word Tracking: applied with the quick spring.
         case quickGlide
+        /// Word Tracking: a reading step that takes the quick spring only
+        /// because a quick glide may still run (`settling`). It does not
+        /// start the settle time again.
+        case settleGlide
         /// A plain write: Classic and Voice-Activated (scrollOffsetAnimation
         /// applies), or the caller's transaction during a look-around.
         case plain
@@ -1181,8 +1202,9 @@ struct SpeechScrollView: View {
     /// of more than `regressionThreshold`. In Word Tracking, a move of more
     /// than `jumpLimit` is a jump with no animation. A forward reading step
     /// that adds `words` (more than 0, at most readingStepWords) glides with
-    /// the reading spring, unless a quick glide may still run (`settling`).
-    /// Every other move takes the quick spring.
+    /// the reading spring. While a quick glide may still run (`settling`),
+    /// such a step is a settle glide. Every other move takes the quick
+    /// spring.
     static func trackingMove(
         from current: CGFloat,
         to target: CGFloat,
@@ -1202,9 +1224,9 @@ struct SpeechScrollView: View {
         guard applies else { return .skip }
         if smoothScroll || step == .still { return .plain }
         if abs(target - current) > jumpLimit { return .jump }
-        if step == .reading, !deliberate, !settling, target < current,
+        if step == .reading, !deliberate, target < current,
            words > 0, words <= readingStepWords {
-            return .readingGlide
+            return settling ? .settleGlide : .readingGlide
         }
         return .quickGlide
     }
@@ -1428,6 +1450,10 @@ struct SpeechScrollView: View {
         // only a large one.
         let regressionThreshold = (stableLineAdvance ?? 40) * 0.9
         let now = ProcessInfo.processInfo.systemUptime
+        // A quick glide may still run in the settle time, and also after
+        // it: a settle glide late in the settle time still moves fast when
+        // the next result comes soon after it.
+        let left = abs((shownOffset.value ?? scrollOffset + manualOffset) - (scrollOffset + manualOffset))
         let move = Self.trackingMove(
             from: scrollOffset,
             to: target,
@@ -1435,7 +1461,8 @@ struct SpeechScrollView: View {
             words: words,
             deliberate: followsBack || force || !hasAppliedTrackingTarget,
             allowsBack: allowsNextBackwardTrackingUpdate,
-            settling: now - lastQuickGlide < Self.quickGlideSettle,
+            settling: now - lastQuickGlide < Self.quickGlideSettle
+                || (lastGlideWasQuick && Self.quickGlideTooFast(left: left, step: abs(target - scrollOffset))),
             regressionThreshold: regressionThreshold,
             jumpLimit: wordFlowCullingBuffer,
             smoothScroll: smoothScroll
@@ -1454,9 +1481,14 @@ struct SpeechScrollView: View {
         case .readingGlide:
             // A spring that replaces a running spring keeps its speed, so
             // the reading steps join into one movement.
+            lastGlideWasQuick = false
             glide(to: target, response: Self.readingSpringResponse)
-        case .quickGlide:
-            lastQuickGlide = now
+        case .quickGlide, .settleGlide:
+            // Only a move that is quick for its own reason starts the
+            // settle time. Else each result in it starts it again, and the
+            // text stops at each result.
+            if move == .quickGlide { lastQuickGlide = now }
+            lastGlideWasQuick = true
             if isAnimatingReadingPositionChange {
                 // The Settings preview moves to a new reading position with
                 // its own curve.

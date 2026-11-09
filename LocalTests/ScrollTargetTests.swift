@@ -1,4 +1,4 @@
-// extract: Textream/Textream/MarqueeTextView.swift Scroll readingSpringResponse quickSpringResponse quickGlideSettle readingStepWords slidLineY slidProgress wordTrackingTarget TrackingStep TrackingMove trackingMove trackingScrollKeepsWord tapLandingOffset WordItem layoutMidY lineMidY perWordMidYs readingLineY smoothReadingAnchor followerPeekOffset manualOffsetBounds
+// extract: Textream/Textream/MarqueeTextView.swift Scroll readingSpringResponse quickSpringResponse quickGlideSettle quickGlideTooFast readingStepWords slidLineY slidProgress wordTrackingTarget TrackingStep TrackingMove trackingMove trackingScrollKeepsWord tapLandingOffset WordItem layoutMidY lineMidY perWordMidYs readingLineY smoothReadingAnchor followerPeekOffset manualOffsetBounds
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the Word Tracking scroll (SpeechScrollView): the target slides
 // along the line, a slow no-bounce spring moves the text for reading steps
@@ -188,16 +188,18 @@ func makeReading(wpm: Double, random: inout Random, events: Bool) -> Reading {
     return reading
 }
 
-/// A steady reading on 5-word lines at 183 wpm: 2 words every 0.656 s,
-/// from 1 s to before `end`. `hold` drops the results from hold.from to
-/// hold.to, so the next result brings all the words that were held.
-func steadyReading(end: Double, hold: (from: Double, to: Double)? = nil) -> [Update] {
+/// A steady reading on 5-word lines at 183 wpm: 2 words every 0.656 s (or
+/// `words` every `period` s), from 1 s to before `end`. `hold` drops the
+/// results from hold.from to hold.to, so the next result brings all the
+/// words that were held.
+func steadyReading(end: Double, hold: (from: Double, to: Double)? = nil,
+                   every period: Double = 0.656, words: Double = 2) -> [Update] {
     var updates: [Update] = []
     var time = 1.0
     var progress = 0.0
     while true {
-        time += 0.656
-        progress += 2
+        time += period
+        progress += words
         guard time < end else { break }
         if let hold, time > hold.from, time < hold.to { continue }
         updates.append(Update(time: time, progress: progress, kind: .reading))
@@ -354,8 +356,19 @@ check("the bug: a catch-up of 8 words (1.6 rows) after a hold glided with the re
       move(-100, -151, .reading, words: 8) == .quickGlide)
 check("the undo of a wrong re-read and a resume after an ad-lib (6 to 12 words) take the quick spring",
       move(-100, -140, .reading, words: 6) == .quickGlide && move(-100, -180, .reading, words: 12) == .quickGlide)
-check("a reading step soon after a quick glide is quick too, so a slow spring never takes over a fast glide",
-      move(-100, -106, .reading, words: 1, settling: true) == .quickGlide)
+check("a reading step soon after a quick glide is a settle glide (quick, but it does not start the settle time again)",
+      move(-100, -106, .reading, words: 1, settling: true) == .settleGlide
+      && move(-100, -164, .reading, words: 5, settling: true) == .settleGlide)
+check("the settle time changes only a reading step: a catch-up, a re-read, a tap, a jump, a look-around step and Classic stay as they are",
+      move(-100, -151, .reading, words: 8, settling: true) == .quickGlide
+      && move(-100, -90, .reading, deliberate: true, settling: true) == .quickGlide
+      && move(-100, -110, .other, settling: true) == .quickGlide
+      && move(-100, -600, .reading, settling: true) == .jump
+      && move(-100, -110, .still, settling: true) == .plain
+      && move(-100, -110, .reading, settling: true, smooth: true) == .plain)
+check("a quick glide is too fast for the reading spring while it has more than a sixth of the new step to go",
+      !Scroll.quickGlideTooFast(left: 1, step: 6) && Scroll.quickGlideTooFast(left: 1.01, step: 6)
+      && !Scroll.quickGlideTooFast(left: 0, step: 12) && Scroll.quickGlideTooFast(left: 3, step: 12))
 check("a reading step with no new words (the layout moved) takes the quick spring",
       move(-100, -110, .reading, words: 0) == .quickGlide)
 check("a forward move under 1 pt is not applied", move(-100, -100.5, .reading) == .skip)
@@ -489,8 +502,18 @@ struct Prompter {
     /// The progress of the highlight that tracking last followed (trackedCharCount).
     var tracked = 0.0
     var lastQuick = -Double.infinity
+    /// True while the last glide of the base used the quick spring (lastGlideWasQuick).
+    var lastWasQuick = false
+    /// The times of the glides that used the quick spring.
+    var quickGlides: [Double] = []
     /// fixed only: false drops the settle time (for the bug checks).
     var settles = true
+    /// fixed only, for the bug checks: true starts the settle time at every
+    /// glide that uses the quick spring, as f68075d did.
+    var renews = false
+    /// fixed only: false drops the check for a quick glide that is still
+    /// too fast after the settle time (for the bug checks).
+    var guards = true
     /// The response of the reading spring (other values for the sweep).
     var readingResponse = Scroll.readingSpringResponse
 
@@ -530,16 +553,23 @@ struct Prompter {
         let regression = advance * 0.9
         switch design {
         case .fixed:
+            let left = abs(shown.shown(at: time) - (base + peek))
+            let tooFast = guards && lastWasQuick
+                && Scroll.quickGlideTooFast(left: CGFloat(left), step: CGFloat(abs(to - base)))
             let move = Scroll.trackingMove(
                 from: CGFloat(base), to: CGFloat(to), step: step, words: words, deliberate: deliberate,
-                allowsBack: false, settling: settles && time - lastQuick < Scroll.quickGlideSettle,
+                allowsBack: false, settling: settles && (time - lastQuick < Scroll.quickGlideSettle || tooFast),
                 regressionThreshold: CGFloat(regression), jumpLimit: 400, smoothScroll: false)
             switch move {
             case .skip: break
             case .jump: moveBase(to, .snap, at: time)
-            case .readingGlide: moveBase(to, .spring(response: readingResponse), at: time)
-            case .quickGlide:
-                lastQuick = time
+            case .readingGlide:
+                lastWasQuick = false
+                moveBase(to, .spring(response: readingResponse), at: time)
+            case .quickGlide, .settleGlide:
+                if move == .quickGlide || renews { lastQuick = time }
+                lastWasQuick = true
+                quickGlides.append(time)
                 moveBase(to, .spring(response: Scroll.quickSpringResponse), at: time)
             case .plain:
                 // A look-around: the base and the peek offset change in one
@@ -849,6 +879,186 @@ info("a result 0.2 s into the glide back: 0.8 s after the glide back starts, the
 check("a result during the glide back does not slow it: 0.8 s after it starts, the text is within 2 pt of its place", glideLeft <= 2)
 check("the bug: a slow spring that replaces the glide back starts with no speed and leaves the text more than 10 pt away", stalled > 10)
 
+// MARK: 4c. The settle time does not start again at each result
+
+/// The events after which a quick glide runs.
+enum QuickEvent: String, CaseIterable { case tap, reread = "re-read", catchUp = "catch-up", glideBack = "glide back" }
+struct AfterEvent { var stops = 0, quick = 0; var past = 0.0, back = 0.0 }
+
+/// Steady reading of `words` words every `period` s, with one event at
+/// 20 s: a tap 12 words back, a re-read of 12 words, a recognizer hold of
+/// 2 s whose next result brings all the held words, or a 60 pt look-around
+/// whose glide back comes 6 s later. Counts from 2 s after the quick glide
+/// (the tap, the re-read, the catch-up result or the glide back) for 20 s:
+/// stop-starts (as simulate counts them), glides that use the quick spring,
+/// the largest distance by which the text goes past its place, and the
+/// backward motion.
+func readOn(after event: QuickEvent, every period: Double, words: Double, ys: [CGFloat] = fiveWords,
+            readLine: Double = floatingLine, advance: Double = 32,
+            setUp: (inout Prompter) -> Void = { _ in }) -> AfterEvent {
+    let eventTime = 20.0
+    var updates: [Update]
+    var quickTime = eventTime
+    switch event {
+    case .catchUp:
+        updates = steadyReading(end: 50, hold: (eventTime, eventTime + 2), every: period, words: words)
+        quickTime = updates.first { $0.time > eventTime }!.time
+    case .tap, .reread:
+        updates = steadyReading(end: eventTime, every: period, words: words)
+        var progress = updates.last!.progress - 12
+        updates.append(Update(time: eventTime, progress: progress, kind: event == .tap ? .tap : .reread))
+        var time = eventTime
+        while time < 50 {
+            time += period
+            progress += words
+            updates.append(Update(time: time, progress: progress, kind: .reading))
+        }
+    case .glideBack:
+        updates = steadyReading(end: 50, every: period, words: words)
+        quickTime = eventTime + 6
+    }
+    var view = Prompter(.fixed, ys, readLine: readLine, advance: advance)
+    setUp(&view)
+    let from = quickTime + 2, to = from + 20
+    var result = AfterEvent()
+    var previous: Double? = nil
+    var stopStart: Double? = nil
+    var peeked = false, glided = false
+    run(updates, &view, until: to, events: { time, view in
+        guard event == .glideBack else { return }
+        if !peeked, time >= eventTime {
+            peeked = true
+            for _ in 0..<6 { view.scroll(by: 10, holds: true, at: time) }
+        }
+        if !glided, time >= eventTime + 6 {
+            glided = true
+            view.glideBack(at: time)
+        }
+    }) { time, view, _ in
+        let s = view.shown.shown(at: time)
+        defer { previous = s }
+        guard time >= from, let previous else { return }
+        let velocity = (s - previous) / dt
+        if velocity > 0 { result.back += velocity * dt }
+        if abs(velocity) < 2 {
+            if stopStart == nil { stopStart = time }
+        } else {
+            if let start = stopStart, time - start >= 0.1 { result.stops += 1 }
+            stopStart = nil
+        }
+        result.past = max(result.past, view.base + view.peek - s)
+    }
+    result.quick = view.quickGlides.filter { $0 >= from && $0 < to }.count
+    return result
+}
+/// f68075d: every glide with the quick spring started the settle time again.
+func renewing(_ view: inout Prompter) {
+    view.renews = true
+    view.guards = false
+}
+let externalFlow = layout(Array(repeating: 6, count: 200), rowHeight: 115)
+for (period, words) in [(0.656, 2.0), (0.33, 1.0)] {
+    let rate = words == 1 ? "1 word every \(period) s" : "\(Int(words)) words every \(period) s"
+    let now = QuickEvent.allCases.map { readOn(after: $0, every: period, words: words) }
+    let old = QuickEvent.allCases.map { readOn(after: $0, every: period, words: words, setUp: renewing) }
+    let external = QuickEvent.allCases.map {
+        readOn(after: $0, every: period, words: words, ys: externalFlow, readLine: 484, advance: 123)
+    }
+    let events = QuickEvent.allCases.map(\.rawValue).joined(separator: ", ")
+    info("\(rate), from 2 s after a \(events) for 20 s: stop-starts \(now.map(\.stops)) (f68075d \(old.map(\.stops))), quick glides \(now.map(\.quick)) (f68075d \(old.map(\.quick)))")
+    check("\(rate), from 2 s after a tap, a re-read, a catch-up or a glide back: no stop-start in 20 s (fewer than 2 a minute)",
+          now.allSatisfy { $0.stops == 0 })
+    check("\(rate), from 2 s after each event: every reading step takes the reading spring", now.allSatisfy { $0.quick == 0 })
+    check("\(rate), from 2 s after each event: the text never goes more than 0.5 pt past its place and never moves back",
+          now.allSatisfy { $0.past <= 0.5 && $0.back < 0.01 })
+    check("\(rate), on the External display (a word moves the text 20 pt): every reading step from 2 s after each event takes the reading spring",
+          external.allSatisfy { $0.quick == 0 && $0.stops == 0 && $0.past <= 0.5 && $0.back < 0.01 })
+    if period > 0.5 {
+        check("the bug (f68075d), \(rate): each result in the settle time started it again, so the text stopped and started at almost every result",
+              old.allSatisfy { $0.stops >= 20 })
+    } else {
+        check("the bug (f68075d), \(rate): each result in the settle time started it again, so every result took the quick spring",
+              old.allSatisfy { $0.quick >= 50 })
+    }
+}
+
+/// A re-read or a tap 12 words back at 20 s during steady reading. A
+/// settle glide of `w1` words comes `late` s after it, near the end of the
+/// settle time, and a result of `w2` words `gap` s after that. Then the
+/// reader is silent. Gives the largest distance by which the text goes past
+/// its place after the settle glide, and the backward motion after the
+/// second result.
+func burst(_ kind: UpdateKind, late: Double, gap: Double, w1: Double, w2: Double,
+           guards: Bool = true) -> (past: Double, back: Double) {
+    var updates = steadyReading(end: 20)
+    var progress = updates.last!.progress - 12
+    updates.append(Update(time: 20, progress: progress, kind: kind))
+    progress += w1
+    updates.append(Update(time: 20 + late, progress: progress, kind: .reading))
+    progress += w2
+    updates.append(Update(time: 20 + late + gap, progress: progress, kind: .reading))
+    var view = Prompter(.fixed, fiveWords, readLine: floatingLine)
+    view.guards = guards
+    var past = 0.0, back = 0.0
+    var previous: Double? = nil
+    run(updates, &view, until: 26) { time, view, _ in
+        let s = view.shown.shown(at: time)
+        defer { previous = s }
+        guard time >= 20 + late else { return }
+        past = max(past, view.base - s)
+        if let previous, time >= 20 + late + gap, s > previous { back += s - previous }
+    }
+    return (past, back)
+}
+var burstPast = 0.0, burstBack = 0.0, unguardedPast = 0.0
+for kind in [UpdateKind.reread, .tap] {
+    for late in [0.70, 0.72, 0.74, 0.76] {
+        for gap in [0.08, 0.10, 0.12] {
+            for (w1, w2) in [(5.0, 1.0), (3, 1), (2, 1), (4, 2)] {
+                let b = burst(kind, late: late, gap: gap, w1: w1, w2: w2)
+                burstPast = max(burstPast, b.past)
+                burstBack = max(burstBack, b.back)
+                unguardedPast = max(unguardedPast, burst(kind, late: late, gap: gap, w1: w1, w2: w2, guards: false).past)
+            }
+        }
+    }
+}
+check("a settle glide 0.70-0.76 s after a re-read or a tap, a result 0.08-0.12 s after it and then silence: the text never goes more than 0.5 pt past its place and never moves back",
+      burstPast <= 0.5 && burstBack < 0.01)
+check("without the check of a fast quick glide, the reading spring takes over the fast settle glide and carries the text \(f1(unguardedPast)) pt past its place",
+      unguardedPast > 5)
+
+/// A quick glide of `distance` that starts at rest. At `age` s, a step of
+/// the distance that it has left divided by `share` takes the reading
+/// spring. Gives the largest distance by which the text goes past the new
+/// target.
+func takeOver(distance: Double, age: Double, share: Double) -> Double {
+    var shown = Shown(0)
+    shown.set(-distance, .spring(response: Scroll.quickSpringResponse), at: 0)
+    var time = 0.0
+    while time < age {
+        shown.advance(to: time, by: dt)
+        time += dt
+    }
+    let left = shown.shown(at: time) + distance
+    let target = -distance - left / share
+    shown.set(target, .spring(response: Scroll.readingSpringResponse), at: time)
+    var past = 0.0
+    let end = time + 8
+    while time < end {
+        shown.advance(to: time, by: dt)
+        past = max(past, target - shown.shown(at: time))
+        time += dt
+    }
+    return past
+}
+let ages = stride(from: 0.05, through: 0.8, by: 0.05)
+let distances = [6.4, 32, 128, 400]
+check("a reading spring that takes over a quick glide with a sixth of the step left never carries the text past the new target",
+      distances.allSatisfy { d in ages.allSatisfy { takeOver(distance: d, age: $0, share: 1.0 / 6) < 0.01 } })
+check("with a third of the step left, it can carry the text past it",
+      distances.contains { d in ages.contains { takeOver(distance: d, age: $0, share: 1.0 / 3) > 0.5 } })
+
 // MARK: 5. A look-around holds the text still
 
 /// A look-around during reading at 183 wpm: at 40 s the user scrolls the
@@ -1052,14 +1262,17 @@ check("only the look-around path writes in one transaction with animations off",
       has(handler.0, handler.1, "if holdsStill { var transaction = Transaction() transaction.disablesAnimations = true withTransaction(transaction, followReader) } else { followReader() }"))
 
 let apply = ("private func applyTrackingTarget(", "private func glide(to target: CGFloat, response: Double) {")
-check("applyTrackingTarget asks trackingMove with the words of the step and the settle time",
-      has(apply.0, apply.1, "let move = Self.trackingMove( from: scrollOffset, to: target, step: step, words: words, deliberate: followsBack || force || !hasAppliedTrackingTarget, allowsBack: allowsNextBackwardTrackingUpdate, settling: now - lastQuickGlide < Self.quickGlideSettle, regressionThreshold: regressionThreshold, jumpLimit: wordFlowCullingBuffer, smoothScroll: smoothScroll )"))
+check("applyTrackingTarget asks trackingMove with the words of the step, the settle time and a quick glide that is still too fast",
+      has(apply.0, apply.1, "let left = abs((shownOffset.value ?? scrollOffset + manualOffset) - (scrollOffset + manualOffset)) let move = Self.trackingMove( from: scrollOffset, to: target, step: step, words: words, deliberate: followsBack || force || !hasAppliedTrackingTarget, allowsBack: allowsNextBackwardTrackingUpdate, settling: now - lastQuickGlide < Self.quickGlideSettle || (lastGlideWasQuick && Self.quickGlideTooFast(left: left, step: abs(target - scrollOffset))), regressionThreshold: regressionThreshold, jumpLimit: wordFlowCullingBuffer, smoothScroll: smoothScroll )"))
 check("a long move jumps with animations off",
       has(apply.0, apply.1, "case .jump: var transaction = Transaction() transaction.disablesAnimations = true withTransaction(transaction) { scrollOffset = target } case .readingGlide:"))
 check("a reading step glides with the reading spring",
-      has(apply.0, apply.1, "case .readingGlide: glide(to: target, response: Self.readingSpringResponse) case .quickGlide:"))
-check("every other Word Tracking move glides with the quick spring and starts the settle time",
-      has(apply.0, apply.1, "case .quickGlide: lastQuickGlide = now if isAnimatingReadingPositionChange { scrollOffset = target } else { glide(to: target, response: Self.quickSpringResponse) } case .plain: scrollOffset = target }"))
+      has(apply.0, apply.1, "case .readingGlide: lastGlideWasQuick = false glide(to: target, response: Self.readingSpringResponse) case .quickGlide, .settleGlide:"))
+check("every other Word Tracking move glides with the quick spring, and only a quick glide for its own reason starts the settle time",
+      has(apply.0, apply.1, "case .quickGlide, .settleGlide: if move == .quickGlide { lastQuickGlide = now } lastGlideWasQuick = true if isAnimatingReadingPositionChange { scrollOffset = target } else { glide(to: target, response: Self.quickSpringResponse) } case .plain: scrollOffset = target }"))
+check("only a quick glide for its own reason and the glide back start the settle time",
+      count("lastQuickGlide = ") == 2 && count("lastQuickGlide = now") == 1
+      && count("lastQuickGlide = ProcessInfo.processInfo.systemUptime") == 1)
 check("a glide writes the base inside a no-bounce spring transaction with animations off",
       has("private func glide(to target: CGFloat, response: Double) {", "private func wordIndex(at",
           "var transaction = Transaction(animation: .spring(response: response, dampingFraction: 1)) transaction.disablesAnimations = true withTransaction(transaction) { scrollOffset = target } }"))
