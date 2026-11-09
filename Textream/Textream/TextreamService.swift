@@ -69,7 +69,8 @@ class TextreamService: NSObject, ObservableObject {
             words: words,
             totalCharCount: totalCharCount,
             paragraphBreakBeforeWordIndices: paragraphBreaks,
-            hasNextPage: hasNextPage
+            hasNextPage: hasNextPage,
+            scrollProgress: overlayController.scrollProgress
         )
 
         if browserServer.isRunning {
@@ -627,7 +628,8 @@ class TextreamService: NSObject, ObservableObject {
             words: words,
             totalCharCount: totalCharCount,
             paragraphBreakBeforeWordIndices: paragraphBreaks,
-            hasNextPage: false
+            hasNextPage: false,
+            scrollProgress: overlayController.scrollProgress
         )
         if browserServer.isRunning {
             browserServer.showContent(

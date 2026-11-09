@@ -267,13 +267,21 @@ struct SpeechScrollView: View {
                     if isPeeking {
                         manualOffset -= scrollOffset - baseBefore
                     }
-                }
-            }
-            .onChange(of: smoothWordProgress) { _, _ in
-                if isListening && smoothScroll {
+                } else if !smoothScroll {
+                    // Paused word tracking: the highlight moves only on a
+                    // deliberate event, such as a tap on another screen or a
+                    // far tap that restarts the recognizer. Follow it.
+                    peekResetGeneration += 1
                     manualOffset = 0
                     recalculateTracking(containerHeight: containerHeight)
                 }
+            }
+            .onChange(of: smoothWordProgress) { _, _ in
+                // Also while paused: the shared position can move from a tap
+                // on another screen, and this screen follows it.
+                guard smoothScroll else { return }
+                manualOffset = 0
+                recalculateTracking(containerHeight: containerHeight)
             }
             .onChange(of: isListening) { _, listening in
                 // Pause and resume cancel a pending peek glide back. A paused
@@ -332,8 +340,10 @@ struct SpeechScrollView: View {
                 // picker closes) shows the highlighted line, not the top. The
                 // first preference change ran before this with no height, so
                 // track again here. Write scrollOffset only once: a second
-                // write in this update leaves the word positions stale.
-                if highlightedCharCount > 0, !smoothScroll,
+                // write in this update leaves the word positions stale. A
+                // smooth view opened mid-session (a late External display)
+                // goes to the shared word in the same way.
+                if smoothScroll ? smoothWordProgress > 0 : highlightedCharCount > 0,
                    readingPositionTransitionDuration == nil {
                     layoutWidth = geo.size.width
                     hasAppliedTrackingTarget = false
@@ -341,6 +351,14 @@ struct SpeechScrollView: View {
                     if hasAppliedTrackingTarget { return }
                 }
                 scrollOffset = initialScrollOffset(containerHeight: containerHeight)
+            }
+            .onDisappear {
+                // Never leave the shared hold on when this view goes away
+                // during a scroll.
+                if smoothScroll && isUserScrolling {
+                    isUserScrolling = false
+                    onManualScroll?(false, smoothWordProgress)
+                }
             }
             .overlay(
                 ScrollWheelView(
@@ -361,8 +379,10 @@ struct SpeechScrollView: View {
                             }
                         }
 
-                        // Pause timer when user starts scrolling in smooth mode
-                        if smoothScroll && !isUserScrolling {
+                        // Pause timer when user scrolls in smooth mode. Report
+                        // every event: the hold has one owner screen, and a
+                        // tap or a scroll on another screen can take it.
+                        if smoothScroll {
                             isUserScrolling = true
                             onManualScroll?(true, 0)
                         }
@@ -382,12 +402,48 @@ struct SpeechScrollView: View {
                     },
                     onScrollEnd: {
                         if smoothScroll && isUserScrolling {
+                            isUserScrolling = false
+                            if Self.smoothReleaseKeepsWord(
+                                manualOffset: manualOffset,
+                                minimumMove: minimumPeekOffset,
+                                readY: activeReadingLineY(containerHeight: containerHeight) - (scrollOffset + manualOffset),
+                                wordY: layoutY(forWordProgress: smoothWordProgress),
+                                rowAdvance: WordFlowLayout.rowHeight(for: font) + WordFlowLayout.lineSpacing(for: font)
+                            ) {
+                                // A release that stays near the line of the
+                                // word keeps the word. A read from a line gives
+                                // its first word, so the shared word would go
+                                // back or forward by up to one line.
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    manualOffset = 0
+                                }
+                                onManualScroll?(false, smoothWordProgress)
+                                return
+                            }
                             // Find the word at the active tracking anchor.
                             let newProgress = wordProgressAtCurrentOffset()
-                            withAnimation(.easeOut(duration: 0.15)) {
+                            if !Self.smoothReleaseChangesProgress(read: newProgress, current: smoothWordProgress, wordCount: words.count) {
+                                // The same word, for example a pull past the
+                                // top at word 0: the progress does not change,
+                                // so no onChange puts the text back. Spring
+                                // back to the tracked position here.
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    manualOffset = 0
+                                }
+                                onManualScroll?(false, smoothWordProgress)
+                                return
+                            }
+                            // The text is already where the reader left it, and
+                            // the new progress puts the same place at the
+                            // reading line. Fold the scroll into the base offset
+                            // without animation: two animations on one offset
+                            // would add up and jolt the text.
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollOffset += manualOffset
                                 manualOffset = 0
                             }
-                            isUserScrolling = false
                             allowsNextBackwardTrackingUpdate = true
                             onManualScroll?(false, newProgress)
                         } else if isListening {
@@ -498,15 +554,13 @@ struct SpeechScrollView: View {
         let center = containerHeight * 0.5
 
         if smoothScroll {
-            // Classic/silence-paused: anchor active word near the bottom, scrolling up
-            let bottomAnchor = containerHeight - 20
-            let wordIdx = Int(smoothWordProgress)
-            let fraction = smoothWordProgress - Double(wordIdx)
-            let clampedIdx = max(0, min(wordIdx, words.count - 1))
-            guard let wordY = wordYPositions[clampedIdx] else { return }
-            let nextY = wordYPositions[clampedIdx + 1] ?? wordY
-            let interpolatedY = wordY + (nextY - wordY) * CGFloat(fraction)
-            applyTrackingTarget(bottomAnchor - interpolatedY)
+            // Classic/silence-paused: anchor active word near the bottom, scrolling up.
+            // The line layout gives the word also when its line is culled.
+            guard let interpolatedY = layoutY(forWordProgress: smoothWordProgress) else { return }
+            applyTrackingTarget(
+                activeReadingLineY(containerHeight: containerHeight) - interpolatedY,
+                followsBack: highlightMovedBack
+            )
         } else {
             // Word-tracking/voice-activated: active word at vertical center
             if let wordY = trackingWordY(activeWordIndex()) {
@@ -517,14 +571,9 @@ struct SpeechScrollView: View {
 
     private func recalcTopWithPreviousLine(highlightMovedBack: Bool) {
         if smoothScroll {
-            let wordIdx = Int(smoothWordProgress)
-            let fraction = smoothWordProgress - Double(wordIdx)
-            let clampedIdx = max(0, min(wordIdx, words.count - 1))
-            guard let wordY = wordYPositions[clampedIdx] else { return }
-            let nextY = wordYPositions[clampedIdx + 1] ?? wordY
-            let interpolatedY = wordY + (nextY - wordY) * CGFloat(fraction)
+            guard let interpolatedY = layoutY(forWordProgress: smoothWordProgress) else { return }
             let target = min(interpolatedY, topReadingAnchor) - interpolatedY
-            applyTrackingTarget(target)
+            applyTrackingTarget(target, followsBack: highlightMovedBack)
         } else {
             guard let wordY = trackingWordY(activeWordIndex()) else { return }
             let target = min(wordY, topReadingAnchor) - wordY
@@ -549,13 +598,112 @@ struct SpeechScrollView: View {
         return wordYPositions[wordIndex]
     }
 
+    /// The Y of a fractional word progress for smooth scrolling, from the line
+    /// layout: between the word and the next one.
+    private func layoutY(forWordProgress progress: Double) -> CGFloat? {
+        Self.smoothLayoutY(progress: progress, wordCount: words.count, wordY: trackingWordY)
+    }
+
+    /// The Y of a fractional word progress, between the Y of the word and
+    /// the Y of the next one. `wordY` gives the Y of a word index.
+    static func smoothLayoutY(progress: Double, wordCount: Int, wordY: (Int) -> CGFloat?) -> CGFloat? {
+        let wordIdx = Int(progress)
+        let fraction = progress - Double(wordIdx)
+        let clampedIdx = max(0, min(wordIdx, wordCount - 1))
+        guard let y = wordY(clampedIdx) else { return nil }
+        let nextY = wordY(clampedIdx + 1) ?? y
+        return y + (nextY - y) * CGFloat(fraction)
+    }
+
+    /// The height in this view where the active word sits.
+    private func activeReadingLineY(containerHeight: CGFloat) -> CGFloat {
+        Self.readingLineY(
+            containerHeight: containerHeight,
+            smoothScroll: smoothScroll,
+            nearTop: readingPosition == .nearTop,
+            topAnchor: topReadingAnchor
+        )
+    }
+
+    /// Classic and Voice-Activated, Centered: the active word sits this high.
+    static func smoothReadingAnchor(containerHeight: CGFloat) -> CGFloat {
+        containerHeight - 20
+    }
+
+    /// The one reading line of a view: the line that tracking puts the active
+    /// word on, and where a scroll release reads the word.
+    static func readingLineY(
+        containerHeight: CGFloat,
+        smoothScroll: Bool,
+        nearTop: Bool,
+        topAnchor: CGFloat
+    ) -> CGFloat {
+        if nearTop { return topAnchor }
+        return smoothScroll
+            ? smoothReadingAnchor(containerHeight: containerHeight)
+            : containerHeight * 0.5
+    }
+
+    /// The fractional word progress at height `atY`, from word Y positions
+    /// sorted by word index.
+    static func wordProgress(atY targetY: CGFloat, positions sorted: [(Int, CGFloat)], wordCount: Int, fallback: Double) -> Double {
+        // Find the closest word and interpolate
+        guard !sorted.isEmpty else { return fallback }
+
+        for i in 0..<sorted.count {
+            let (wordIdx, wordY) = sorted[i]
+            if i + 1 < sorted.count {
+                let (_, nextY) = sorted[i + 1]
+                if targetY >= wordY && targetY <= nextY {
+                    let frac = (nextY - wordY) > 0 ? Double(targetY - wordY) / Double(nextY - wordY) : 0
+                    return Double(wordIdx) + frac
+                }
+            } else if targetY >= wordY {
+                return Double(wordIdx)
+            }
+        }
+        // If scrolled above all words, return 0
+        if targetY < (sorted.first?.1 ?? 0) {
+            return 0
+        }
+        return Double(wordCount)
+    }
+
+    /// Smooth scroll release: true when the word read at the reading line,
+    /// clamped as SharedScrollProgress.endHold clamps it, differs from the
+    /// current word. When it does not, the progress does not change and no
+    /// onChange puts the text back, so the release must spring back itself.
+    static func smoothReleaseChangesProgress(read: Double, current: Double, wordCount: Int) -> Bool {
+        max(0, min(Double(wordCount), read)) != current
+    }
+
+    /// Smooth scroll release: true keeps the current word, false takes the
+    /// word read at the reading line. A touch that moved the text less than
+    /// `minimumMove` (a trackpad touch with no real move) keeps it. A release
+    /// whose reading line (`readY`, in layout space) is less than half a row
+    /// from `wordY`, the layout Y of the current word, also keeps it: one
+    /// mouse-wheel notch is 10 px. Words on one line share a Y, so a read from
+    /// that line gives its first or last word, and every screen would go back
+    /// or forward by up to one line.
+    static func smoothReleaseKeepsWord(
+        manualOffset: CGFloat,
+        minimumMove: CGFloat,
+        readY: CGFloat,
+        wordY: CGFloat?,
+        rowAdvance: CGFloat
+    ) -> Bool {
+        if abs(manualOffset) < minimumMove { return true }
+        guard let wordY else { return false }
+        return abs(readY - wordY) < rowAdvance / 2
+    }
+
     private func repositionTracking(toWordIndex wordIndex: Int) {
         guard let wordY = trackingWordY(wordIndex) else { return }
 
         let target: CGFloat
         switch readingPosition {
         case .centered:
-            target = containerHeight * 0.5 - wordY
+            target = activeReadingLineY(containerHeight: containerHeight) - wordY
         case .nearTop:
             target = min(wordY, topReadingAnchor) - wordY
         }
@@ -652,36 +800,27 @@ struct SpeechScrollView: View {
 
     /// Find the word progress at the current visual position (scrollOffset + manualOffset)
     private func wordProgressAtCurrentOffset() -> Double {
-        let trackingY: CGFloat
-        switch readingPosition {
-        case .centered:
-            trackingY = containerHeight * 0.5
-        case .nearTop:
-            trackingY = topReadingAnchor
+        let targetY = activeReadingLineY(containerHeight: containerHeight) - (scrollOffset + manualOffset)
+        // The line layout has every word, also on culled lines. The measured
+        // positions are a fallback before the view has a width.
+        let positions: [(Int, CGFloat)]
+        if layoutWidth > 0 {
+            positions = WordFlowLayout(
+                words: words,
+                highlightedCharCount: highlightedCharCount,
+                font: font,
+                paragraphBreakBeforeWordIndices: paragraphBreakBeforeWordIndices,
+                containerWidth: layoutWidth
+            ).wordMidYs().enumerated().map { ($0.offset, $0.element) }
+        } else {
+            positions = wordYPositions.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
         }
-        let targetY = trackingY - (scrollOffset + manualOffset)
-
-        // Find the closest word and interpolate
-        let sorted = wordYPositions.sorted { $0.key < $1.key }
-        guard !sorted.isEmpty else { return smoothWordProgress }
-
-        for i in 0..<sorted.count {
-            let (wordIdx, wordY) = sorted[i]
-            if i + 1 < sorted.count {
-                let (_, nextY) = sorted[i + 1]
-                if targetY >= wordY && targetY <= nextY {
-                    let frac = (nextY - wordY) > 0 ? Double(targetY - wordY) / Double(nextY - wordY) : 0
-                    return Double(wordIdx) + frac
-                }
-            } else if targetY >= wordY {
-                return Double(wordIdx)
-            }
-        }
-        // If scrolled above all words, return 0
-        if targetY < (sorted.first?.value ?? 0) {
-            return 0
-        }
-        return Double(words.count)
+        return Self.wordProgress(
+            atY: targetY,
+            positions: positions,
+            wordCount: words.count,
+            fallback: smoothWordProgress
+        )
     }
 
     private func activeWordIndex() -> Int {
@@ -729,7 +868,9 @@ struct WordFlowLayout: View {
 
     // Compute line spacing based on font metrics — fonts with large built-in
     // line height (e.g. OpenDyslexic) need less extra spacing
-    private var lineSpacing: CGFloat {
+    private var lineSpacing: CGFloat { Self.lineSpacing(for: font) }
+
+    static func lineSpacing(for font: NSFont) -> CGFloat {
         let intrinsicHeight = font.ascender - font.descender + font.leading
         let ratio = intrinsicHeight / font.pointSize
         // System fonts: ratio ~1.2, OpenDyslexic: ratio ~1.7+
@@ -764,11 +905,11 @@ struct WordFlowLayout: View {
             + rowHeight * 0.5
     }
 
-    // Simple layout cache to avoid re-measuring words on every highlight update
-    private static var _cacheKey: String = ""
-    private static var _cachedItems: [WordItem] = []
-    private static var _cachedLines: [[WordItem]] = []
-    private static var _cachedParagraphPrefixCounts: [Int] = []
+    // Layout cache to avoid re-measuring words on every highlight update.
+    // Several entries, because every prompter screen (overlay and External
+    // display, each with its own font and width) reads it on each tick.
+    private static var _layoutCache: [String: ([WordItem], [[WordItem]], [Int])] = [:]
+    private static let layoutCacheLimit = 4
 
     private func cachedLayout() -> ([WordItem], [[WordItem]], [Int]) {
         let paragraphKey = paragraphBreakBeforeWordIndices.sorted()
@@ -776,8 +917,8 @@ struct WordFlowLayout: View {
             .joined(separator: ",")
         let key = "\(words.count)|\(words.first ?? "")|\(words.last ?? "")|"
             + "\(font.fontName)|\(font.pointSize)|\(Int(containerWidth))|\(paragraphKey)"
-        if key == Self._cacheKey {
-            return (Self._cachedItems, Self._cachedLines, Self._cachedParagraphPrefixCounts)
+        if let cached = Self._layoutCache[key] {
+            return cached
         }
         let items = buildItems()
         let lines = buildLines(items: items)
@@ -790,10 +931,10 @@ struct WordFlowLayout: View {
                 paragraphPrefixCounts[paragraphPrefixCounts.count - 1] + (beginsParagraph ? 1 : 0)
             )
         }
-        Self._cacheKey = key
-        Self._cachedItems = items
-        Self._cachedLines = lines
-        Self._cachedParagraphPrefixCounts = paragraphPrefixCounts
+        if Self._layoutCache.count >= Self.layoutCacheLimit {
+            Self._layoutCache.removeAll()
+        }
+        Self._layoutCache[key] = (items, lines, paragraphPrefixCounts)
         return (items, lines, paragraphPrefixCounts)
     }
 
@@ -810,6 +951,36 @@ struct WordFlowLayout: View {
             lineSpacing: lineSpacing,
             paragraphSpacing: paragraphDividerExtraSpacing
         )
+    }
+
+    /// The layout midY of every word, by word index. Each word gets the midY
+    /// of the first word on its line, as the rendered positions do.
+    func wordMidYs() -> [CGFloat] {
+        let (_, lines, paragraphPrefixCounts) = cachedLayout()
+        let rowHeight = Self.rowHeight(for: font)
+        return Self.perWordMidYs(lines: lines.map { line in
+            (line.count, line.first.flatMap {
+                Self.layoutMidY(
+                    ofWordAt: $0.id,
+                    lines: lines,
+                    paragraphPrefixCounts: paragraphPrefixCounts,
+                    rowHeight: rowHeight,
+                    lineSpacing: lineSpacing,
+                    paragraphSpacing: paragraphDividerExtraSpacing
+                )
+            })
+        })
+    }
+
+    /// One midY for each word: each line gives its midY to each of its words.
+    /// A line with no midY adds nothing.
+    static func perWordMidYs(lines: [(wordCount: Int, midY: CGFloat?)]) -> [CGFloat] {
+        var result: [CGFloat] = []
+        for line in lines {
+            guard let midY = line.midY else { continue }
+            result.append(contentsOf: repeatElement(midY, count: line.wordCount))
+        }
+        return result
     }
 
     // Find the index of the next word to read (first non-fully-lit, non-annotation word)
@@ -1161,9 +1332,15 @@ class ScrollWheelNSView: NSView {
     var onScroll: ((CGFloat) -> Void)?
     var onScrollEnd: (() -> Void)?
     private var scrollMonitor: Any?
+    /// A mouse wheel sends no phases, so no end. This ends it 0.4 s after the
+    /// last wheel event.
+    private var wheelEndItem: DispatchWorkItem?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil {
+            cancelWheelEnd()
+        }
         if window != nil && scrollMonitor == nil {
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
                 guard let self, let window = self.window else { return event }
@@ -1171,18 +1348,57 @@ class ScrollWheelNSView: NSView {
                 if event.window == window {
                     let delta = event.scrollingDeltaY
                     let scaled = event.hasPreciseScrollingDeltas ? delta : delta * 10
-                    self.onScroll?(scaled)
-
-                    if event.phase == .ended || event.momentumPhase == .ended {
-                        self.onScrollEnd?()
-                    }
+                    self.handleScroll(delta: scaled, phase: event.phase, momentumPhase: event.momentumPhase)
                 }
                 return event
             }
         }
     }
 
+    /// One scroll event in this view's window.
+    func handleScroll(delta: CGFloat, phase: NSEvent.Phase, momentumPhase: NSEvent.Phase) {
+        cancelWheelEnd()
+        onScroll?(delta)
+
+        switch Self.scrollEndTiming(phase: phase, momentumPhase: momentumPhase) {
+        case .now:
+            onScrollEnd?()
+        case .afterWheelPause:
+            // Read onScrollEnd when the item runs: updateNSView may have
+            // replaced it since.
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.wheelEndItem = nil
+                self.onScrollEnd?()
+            }
+            wheelEndItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+        case .noEnd:
+            break
+        }
+    }
+
+    /// When a scroll event ends the scroll.
+    enum ScrollEndTiming { case now, afterWheelPause, noEnd }
+
+    /// A trackpad gesture ends at its .ended or .cancelled phase (a cancelled
+    /// gesture sends no .ended). A mouse wheel sends no phases, so it ends
+    /// 0.4 s after its last event. Other trackpad events do not end it.
+    static func scrollEndTiming(phase: NSEvent.Phase, momentumPhase: NSEvent.Phase) -> ScrollEndTiming {
+        if phase == .ended || phase == .cancelled
+            || momentumPhase == .ended || momentumPhase == .cancelled {
+            return .now
+        }
+        return phase.isEmpty && momentumPhase.isEmpty ? .afterWheelPause : .noEnd
+    }
+
+    private func cancelWheelEnd() {
+        wheelEndItem?.cancel()
+        wheelEndItem = nil
+    }
+
     override func removeFromSuperview() {
+        cancelWheelEnd()
         if let monitor = scrollMonitor {
             NSEvent.removeMonitor(monitor)
             scrollMonitor = nil

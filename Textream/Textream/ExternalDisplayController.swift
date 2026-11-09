@@ -34,7 +34,8 @@ class ExternalDisplayController {
         words: [String],
         totalCharCount: Int,
         paragraphBreakBeforeWordIndices: Set<Int> = [],
-        hasNextPage: Bool = false
+        hasNextPage: Bool = false,
+        scrollProgress: SharedScrollProgress
     ) {
         let settings = NotchSettings.shared
         guard settings.externalDisplayMode != .off else { return }
@@ -55,7 +56,8 @@ class ExternalDisplayController {
             speechRecognizer: speechRecognizer,
             mirrorAxis: mirrorAxis,
             handlesAutoNextPage: false,
-            usesExternalSizing: true
+            usesExternalSizing: true,
+            scrollProgress: scrollProgress
         )
 
         let hostingView = NSHostingView(rootView: content)
@@ -121,14 +123,19 @@ struct ExternalDisplayView: View {
     /// The External tab's text size and column width. Fullscreen on the Mac's
     /// own screen shares this view but keeps the automatic layout.
     var usesExternalSizing: Bool = false
+    /// The session's reading position, shared with the overlay.
+    let scrollProgress: SharedScrollProgress
+    /// True only when this view is the session overlay (Fullscreen). Only one
+    /// screen may run the clock: a second one that ticks doubles the speed.
+    var drivesProgress = false
 
     private var words: [String] { content.words }
     private var totalCharCount: Int { content.totalCharCount }
     private var hasNextPage: Bool { content.hasNextPage }
 
-    // Timer-based scroll for classic & silence-paused modes
-    @State private var timerWordProgress: Double = 0
-    @State private var isUserScrolling: Bool = false
+    // Timer-based scroll for classic & silence-paused modes. The position
+    // itself is scrollProgress, shared with the overlay.
+    @State private var scrollHoldID = UUID()
     @State private var countdownRemaining: Int = 0
     @State private var countdownTimer: Timer? = nil
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
@@ -137,40 +144,16 @@ struct ExternalDisplayView: View {
         NotchSettings.shared.listeningMode
     }
 
-    /// Convert fractional word index to char offset using actual word lengths
-    private func charOffsetForWordProgress(_ progress: Double) -> Int {
-        let wholeWord = Int(progress)
-        let frac = progress - Double(wholeWord)
-        var offset = 0
-        for i in 0..<min(wholeWord, words.count) {
-            offset += words[i].count + 1
-        }
-        if wholeWord < words.count {
-            offset += Int(Double(words[wholeWord].count) * frac)
-        }
-        return min(offset, totalCharCount)
-    }
-
-    /// Convert char offset back to fractional word index (for taps)
-    private func wordProgressForCharOffset(_ charOffset: Int) -> Double {
-        var offset = 0
-        for (i, word) in words.enumerated() {
-            let end = offset + word.count
-            if charOffset <= end {
-                let frac = Double(charOffset - offset) / Double(max(1, word.count))
-                return Double(i) + frac
-            }
-            offset = end + 1
-        }
-        return Double(words.count)
-    }
-
     private var effectiveCharCount: Int {
         switch listeningMode {
         case .wordTracking:
             return speechRecognizer.recognizedCharCount
         case .classic, .silencePaused:
-            return charOffsetForWordProgress(timerWordProgress)
+            return ScrollProgressMath.charOffset(
+                forWordProgress: scrollProgress.wordProgress,
+                words: words,
+                totalCharCount: totalCharCount
+            )
         }
     }
 
@@ -183,7 +166,8 @@ struct ExternalDisplayView: View {
         case .wordTracking, .silencePaused:
             return speechRecognizer.isListening
         case .classic:
-            return true
+            // The Pause button on the Mac window also stops this screen.
+            return !scrollProgress.isPaused
         }
     }
 
@@ -220,22 +204,23 @@ struct ExternalDisplayView: View {
         }
         .onDisappear { cancelCountdown() }
         .onReceive(scrollTimer) { _ in
-            guard !isDone, !isUserScrolling else { return }
-            let speed = NotchSettings.shared.scrollSpeed // words per second
-            switch listeningMode {
-            case .classic:
-                timerWordProgress += speed * 0.05
-            case .silencePaused:
-                if speechRecognizer.isListening && speechRecognizer.isSpeaking {
-                    timerWordProgress += speed * 0.05
-                }
-            case .wordTracking:
-                break
-            }
+            // Only the session overlay advances the shared clock. The
+            // External display only reads it (drivesProgress is false).
+            let step = ScrollProgressMath.tickStep(
+                drivesProgress: drivesProgress,
+                isWordTracking: listeningMode == .wordTracking,
+                isClassic: listeningMode == .classic,
+                isPaused: scrollProgress.isPaused,
+                isHeld: scrollProgress.isUserScrolling,
+                isDone: isDone,
+                isListening: speechRecognizer.isListening,
+                isSpeaking: speechRecognizer.isSpeaking,
+                scrollSpeed: NotchSettings.shared.scrollSpeed
+            )
+            if step > 0 { scrollProgress.wordProgress += step }
         }
         .onChange(of: content.currentPageIndex) { _, _ in
-            timerWordProgress = 0
-            isUserScrolling = false
+            // NotchOverlayController.updateContent resets the shared position.
             cancelCountdown()
         }
     }
@@ -263,17 +248,18 @@ struct ExternalDisplayView: View {
                         if listeningMode == .wordTracking {
                             speechRecognizer.jumpTo(charOffset: charOffset)
                         } else {
-                            timerWordProgress = wordProgressForCharOffset(charOffset)
+                            scrollProgress.jump(to: ScrollProgressMath.wordProgress(forCharOffset: charOffset, words: words))
                         }
                     },
                     onManualScroll: { scrolling, newProgress in
-                        isUserScrolling = scrolling
-                        if !scrolling {
-                            timerWordProgress = max(0, min(Double(words.count), newProgress))
+                        if scrolling {
+                            scrollProgress.beginHold(by: scrollHoldID)
+                        } else {
+                            scrollProgress.endHold(by: scrollHoldID, at: newProgress, wordCount: words.count)
                         }
                     },
                     smoothScroll: listeningMode != .wordTracking,
-                    smoothWordProgress: timerWordProgress,
+                    smoothWordProgress: scrollProgress.wordProgress,
                     isListening: isEffectivelyListening,
                     readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
