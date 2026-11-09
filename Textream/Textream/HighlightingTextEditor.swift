@@ -127,6 +127,15 @@ struct HighlightingTextEditor: NSViewRepresentable {
 
         init(_ parent: HighlightingTextEditor) {
             self.parent = parent
+            super.init()
+            // Esc in the Scripts search, and New Page, put the cursor here.
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(focusEditor), name: .focusEditor, object: nil)
+        }
+
+        @objc private func focusEditor() {
+            guard let textView, let window = textView.window else { return }
+            window.makeFirstResponder(textView)
         }
 
         func textDidChange(_ notification: Notification) {

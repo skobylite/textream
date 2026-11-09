@@ -13,6 +13,8 @@ extension Notification.Name {
     static let openAbout = Notification.Name("openAbout")
     static let startPrompter = Notification.Name("startPrompter")
     static let newPage = Notification.Name("newPage")
+    static let searchScripts = Notification.Name("searchScripts")
+    static let focusEditor = Notification.Name("focusEditor")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -219,6 +221,13 @@ struct TextreamApp: App {
                     NotificationCenter.default.post(name: .startPrompter, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: .command)
+            }
+            // The script editor has no Find, so ⌘F is free.
+            CommandGroup(after: .textEditing) {
+                Button("Search Scripts") {
+                    NotificationCenter.default.post(name: .searchScripts, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
             }
             CommandGroup(replacing: .windowArrangement) { }
             CommandGroup(replacing: .help) {

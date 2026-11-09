@@ -26,6 +26,11 @@ struct ContentView: View {
     @State private var ignoredLanguageIdentifier: String?
     @State private var languageDetectionTask: Task<Void, Never>?
     @FocusState private var isTextFocused: Bool
+    /// Sidebar search for the Scripts list. Not saved.
+    @State private var scriptQuery = ""
+    @FocusState private var isScriptSearchFocused: Bool
+    /// Bound so that ⌘F can show a hidden sidebar.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
     private let defaultText = """
 Welcome to Textream! This is your personal teleprompter that sits right below your MacBook's notch. [smile]
@@ -506,7 +511,7 @@ Happy presenting! [wave]
             if NotchSettings.shared.directorModeEnabled {
                 directorOverlay
             } else {
-                NavigationSplitView {
+                NavigationSplitView(columnVisibility: $columnVisibility) {
                     pageSidebar
                 } detail: {
                     mainContent
@@ -634,7 +639,22 @@ Happy presenting! [wave]
                 service.pages.append("")
                 moveToPage(service.pages.count - 1)
             }
-            isTextFocused = true
+            // The cursor goes to the new page, also from the search field.
+            NotificationCenter.default.post(name: .focusEditor, object: nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .searchScripts)) { _ in
+            // ⌘F. The field shows only once a script vault is chosen.
+            // Director mode has no sidebar.
+            guard !isRunning, !NotchSettings.shared.directorModeEnabled,
+                  ScriptQueue.shared.vaultURL != nil else { return }
+            // A hidden sidebar is shown first. Otherwise the cursor stays
+            // in the editor, and the search words go into the script. Until
+            // the field can take the cursor, keys only beep.
+            if columnVisibility != .all {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+                columnVisibility = .all
+            }
+            focusScriptSearch()
         }
         .onReceive(NotificationCenter.default.publisher(for: .startPrompter)) { _ in
             // ⌘↩ from the editor. The main window hides while the prompter runs,
@@ -749,6 +769,63 @@ Happy presenting! [wave]
         return (old, target > old ? target - 1 : target)
     }
 
+    /// Puts the cursor in the search field. While a hidden sidebar opens,
+    /// the field cannot take focus yet, so this tries again for up to 0.5 s.
+    private func focusScriptSearch(triesLeft: Int = 10) {
+        isScriptSearchFocused = true
+        guard triesLeft > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if !isScriptSearchFocused { focusScriptSearch(triesLeft: triesLeft - 1) }
+        }
+    }
+
+    /// Search for the Scripts list, pinned at the top of the sidebar. ⌘F
+    /// focuses it. Esc clears it, and a second Esc puts the cursor back in
+    /// the editor. Local-only.
+    private var scriptSearchField: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .onTapGesture { isScriptSearchFocused = true }
+                .accessibilityHidden(true)
+            TextField("Search scripts", text: $scriptQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .focused($isScriptSearchFocused)
+                .onExitCommand {
+                    if scriptQuery.isEmpty {
+                        NotificationCenter.default.post(name: .focusEditor, object: nil)
+                    } else {
+                        scriptQuery = ""
+                    }
+                }
+            if !scriptQuery.isEmpty {
+                Button {
+                    scriptQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(0.06))
+                .onTapGesture { isScriptSearchFocused = true }
+        )
+        .help("Search scripts (⌘F)")
+        .padding(.horizontal, 10)
+        .padding(.top, 2)
+        .padding(.bottom, 4)
+    }
+
     private var pageSidebar: some View {
         List(selection: sidebarSelection) {
             ForEach(Array(service.pages.enumerated()), id: \.offset) { index, page in
@@ -788,11 +865,17 @@ Happy presenting! [wave]
 
             ScriptQueueSection(
                 currentPageIndex: service.currentPageIndex,
+                query: scriptQuery,
                 onLoad: { loadScript($0) },
                 onMarkDone: { markScriptDone($0) }
             )
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .top) {
+            if ScriptQueue.shared.vaultURL != nil {
+                scriptSearchField
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
                 ScriptQueueMessage()
@@ -1165,14 +1248,19 @@ private struct ScriptQueueMessage: View {
 private struct ScriptQueueSection: View {
     /// The selected page, so the row of the note shown in the editor is marked.
     let currentPageIndex: Int
+    /// Text from the sidebar search field. Notes whose title does not match are hidden.
+    let query: String
     /// ContentView handles the row actions: they stop dictation first.
     let onLoad: (QueueItem) -> Void
     let onMarkDone: (QueueItem) -> Void
     @State private var queue = ScriptQueue.shared
 
     var body: some View {
+        let shown = queue.items.filter { ScriptQueue.titleMatches($0.title, query: query) }
+        // Spaces alone do not filter, so they do not count as a search.
+        let searching = query.contains { !$0.isWhitespace }
         Section {
-            ForEach(queue.items) { item in
+            ForEach(shown) { item in
                 Button {
                     onLoad(item)
                 } label: {
@@ -1206,6 +1294,12 @@ private struct ScriptQueueSection: View {
                     Button("Mark Done") { onMarkDone(item) }
                 }
             }
+            if shown.isEmpty, searching {
+                Text("No matches")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 8))
+            }
         } header: {
             Button {
                 if queue.vaultURL == nil { queue.pickVault() } else { queue.rescan() }
@@ -1215,7 +1309,9 @@ private struct ScriptQueueSection: View {
                         .font(.system(size: 10, weight: .semibold))
                     Text(queue.vaultURL == nil
                          ? "Choose Script Vault…"
-                         : "Scripts (\(queue.items.count))")
+                         : searching
+                           ? "Scripts (\(shown.count) of \(queue.items.count))"
+                           : "Scripts (\(queue.items.count))")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(.secondary)

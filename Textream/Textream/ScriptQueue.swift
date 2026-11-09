@@ -293,6 +293,19 @@ class ScriptQueue {
         ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     }
 
+    /// True when every word of the search text is in the title, in any
+    /// order, ignoring case and accents. A curly apostrophe matches a
+    /// straight one. Empty search text matches all.
+    static func titleMatches(_ title: String, query: String) -> Bool {
+        func plain(_ s: String) -> String {
+            s.replacingOccurrences(of: "\u{2019}", with: "'")
+                .replacingOccurrences(of: "\u{2018}", with: "'")
+        }
+        let title = plain(title)
+        return plain(query).split(whereSeparator: \.isWhitespace)
+            .allSatisfy { title.localizedStandardContains($0) }
+    }
+
     private func persistSlot() {
         let pages = TextreamService.shared.pages
         if let i = slotIndex, let p = slotPath, let synced = slotSyncedBody, i < pages.count {
