@@ -227,6 +227,21 @@ class ScriptQueue {
         return lstat(path, &info) == 0 && info.st_flags & UInt32(SF_DATALESS) != 0
     }
 
+    /// False when iCloud removed the note's content from this Mac. Then
+    /// the sidebar search does not open it by itself: the read would wait
+    /// for the download, or fail when offline. As in a scan, the download
+    /// starts. A click still opens the note.
+    func isDownloaded(_ item: QueueItem) -> Bool {
+        // Inside the vault's access, as in a scan: outside it the check can
+        // fail, and the note would count as downloaded. Without access, load
+        // shows the problem.
+        guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else { return true }
+        defer { vault.stopAccessingSecurityScopedResource() }
+        guard Self.isDataless(item.id) else { return true }
+        try? FileManager.default.startDownloadingUbiquitousItem(at: item.url)
+        return false
+    }
+
     /// The start of a note, enough to read its frontmatter: the first 16 KB,
     /// or the whole file when the frontmatter does not end in them or the
     /// cut falls inside a character.
@@ -304,6 +319,20 @@ class ScriptQueue {
         let title = plain(title)
         return plain(query).split(whereSeparator: \.isWhitespace)
             .allSatisfy { title.localizedStandardContains($0) }
+    }
+
+    /// The Scripts rows for the search text, in list order. The list and
+    /// topMatch both use this, so the top result is always the first row.
+    static func matches(in items: [QueueItem], query: String) -> [QueueItem] {
+        items.filter { titleMatches($0.title, query: query) }
+    }
+
+    /// The note that the sidebar search opens by itself: the first row of
+    /// the list. Nil when nothing matches, or when the search text has only
+    /// spaces (then the list shows every note).
+    static func topMatch(in items: [QueueItem], query: String) -> QueueItem? {
+        guard query.contains(where: { !$0.isWhitespace }) else { return nil }
+        return matches(in: items, query: query).first
     }
 
     private func persistSlot() {
@@ -473,7 +502,10 @@ class ScriptQueue {
         return hits.count == 1 ? hits[0] : nil
     }
 
-    func load(_ item: QueueItem) {
+    /// Opens a note in the vault page. A load clears the red message first.
+    /// keepMessage keeps it: the Scripts search can open several notes in
+    /// one search, and a warning must stay until the owner reads it.
+    func load(_ item: QueueItem, keepMessage: Bool = false) {
         guard let vault = vaultURL, vault.startAccessingSecurityScopedResource() else {
             lastError = "Could not open the vault. Choose the vault folder again."
             return
@@ -484,7 +516,7 @@ class ScriptQueue {
             rescan()                               // it may have been renamed or moved
             return
         }
-        lastError = nil                            // before the flush, so its message stays
+        if !keepMessage { lastError = nil }        // before the flush, so its message stays
         let body = Self.stripFrontmatter(text)
         let service = TextreamService.shared
 

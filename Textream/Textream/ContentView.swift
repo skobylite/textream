@@ -29,6 +29,8 @@ struct ContentView: View {
     /// Sidebar search for the Scripts list. Not saved.
     @State private var scriptQuery = ""
     @FocusState private var isScriptSearchFocused: Bool
+    /// The pause before the top search result opens (openTopMatchAfterPause).
+    @State private var topMatchTask: Task<Void, Never>?
     /// Bound so that ⌘F can show a hidden sidebar.
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
@@ -692,8 +694,12 @@ Happy presenting! [wave]
             ignoredLanguageIdentifier = nil
             scheduleLanguageDetection(for: service.currentPageText)
         }
+        .onChange(of: scriptQuery) { _, query in
+            openTopMatchAfterPause(for: query)
+        }
         .onDisappear {
             languageDetectionTask?.cancel()
+            topMatchTask?.cancel()
             if isRecording {
                 stopRecording()
             }
@@ -752,6 +758,10 @@ Happy presenting! [wave]
     /// replaced page list (file open, import, Director) or a page change made
     /// by the prompter must never lose a page.
     private func moveToPage(_ index: Int) {
+        // The owner's page move wins over a search result that waits to
+        // open. On a blank page, Add Page and Cmd-N leave the same pages,
+        // so the page check in openTopMatchAfterPause does not see them.
+        topMatchTask?.cancel()
         let move = Self.leavingBlankPage(service.pages, from: service.currentPageIndex, to: index)
         if let blank = move.remove {
             service.pages.remove(at: blank)
@@ -779,9 +789,54 @@ Happy presenting! [wave]
         }
     }
 
+    /// Opens the top Scripts search result in the editor when the typing
+    /// pauses for 0.25 s, through loadScript, as a click on its row does,
+    /// but the red message stays. The cursor stays in the search field.
+    /// Each change of the search text starts the pause again. A blank
+    /// search starts none, so Esc and the clear button keep the shown note.
+    private func openTopMatchAfterPause(for query: String) {
+        topMatchTask?.cancel()
+        guard query.contains(where: { !$0.isWhitespace }) else { return }
+        let pages = service.pages
+        let pageIndex = service.currentPageIndex
+        topMatchTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+            // Open only when nothing else happened in the pause.
+            guard !Task.isCancelled,
+                  // Cmd-N or a click moved the cursor. A note must not
+                  // replace the page that the owner types in.
+                  isScriptSearchFocused,
+                  !isRunning,               // Cmd-Return started the prompter
+                  !isRecording,             // dictation records: a load would stop it
+                  // A menu or an alert is open. A page's menu acts on the
+                  // place the page had when the menu opened, and a load can
+                  // move the pages.
+                  RunLoop.main.currentMode == .default,
+                  // Add Page, Delete Page or a page click.
+                  service.pages == pages, service.currentPageIndex == pageIndex
+            else { return }
+            let queue = ScriptQueue.shared
+            // The first row of the list as it is now.
+            guard let top = ScriptQueue.topMatch(in: queue.items, query: scriptQuery),
+                  // Already shown: a second load would read the note again.
+                  queue.pageOrigins[service.currentPageIndex] != top.id,
+                  // Not on this Mac: the read would wait for iCloud.
+                  queue.isDownloaded(top)
+            else { return }
+            // An earlier open in this search can have shown a warning. It
+            // stays until the owner reads it.
+            loadScript(top, keepMessage: true)
+        }
+    }
+
     /// Search for the Scripts list, pinned at the top of the sidebar. ⌘F
-    /// focuses it. Esc clears it, and a second Esc puts the cursor back in
-    /// the editor. Local-only.
+    /// focuses it. When the typing pauses, the top result opens in the
+    /// editor. Esc clears it, and a second Esc puts the cursor back in the
+    /// editor. Local-only.
     private var scriptSearchField: some View {
         HStack(spacing: 4) {
             Image(systemName: "magnifyingglass")
@@ -866,7 +921,8 @@ Happy presenting! [wave]
             ScriptQueueSection(
                 currentPageIndex: service.currentPageIndex,
                 query: scriptQuery,
-                onLoad: { loadScript($0) },
+                // A click wins over a search result that waits to open.
+                onLoad: { topMatchTask?.cancel(); loadScript($0) },
                 onMarkDone: { markScriptDone($0) }
             )
         }
@@ -926,16 +982,17 @@ Happy presenting! [wave]
         }
     }
 
-    /// A Scripts row was clicked. Dictation stops first, so it cannot write
-    /// into the note that replaces the page text. When the note opens on
-    /// another page, the blank page the owner was on is removed, as in
-    /// moveToPage.
-    private func loadScript(_ item: QueueItem) {
+    /// A Scripts row was clicked, or the search opened its top result
+    /// (keepMessage: the red message stays). Dictation stops first, so it
+    /// cannot write into the note that replaces the page text. When the
+    /// note opens on another page, the blank page the owner was on is
+    /// removed, as in moveToPage.
+    private func loadScript(_ item: QueueItem, keepMessage: Bool = false) {
         if isRecording {
             stopRecording()
         }
         let left = service.currentPageIndex
-        ScriptQueue.shared.load(item)
+        ScriptQueue.shared.load(item, keepMessage: keepMessage)
         let now = service.currentPageIndex
         // Not when the note's page is blank too: then the two blank pages
         // cannot be told apart, and the note would lose its page.
@@ -1256,7 +1313,7 @@ private struct ScriptQueueSection: View {
     @State private var queue = ScriptQueue.shared
 
     var body: some View {
-        let shown = queue.items.filter { ScriptQueue.titleMatches($0.title, query: query) }
+        let shown = ScriptQueue.matches(in: queue.items, query: query)
         // Spaces alone do not filter, so they do not count as a search.
         let searching = query.contains { !$0.isWhitespace }
         Section {
