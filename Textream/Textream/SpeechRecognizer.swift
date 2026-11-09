@@ -1192,9 +1192,9 @@ class SpeechRecognizer {
     /// True when spoken `words` say the script word `script` as more words:
     /// joined they are the script word ("c r m" for "CRM", "step by step" for
     /// "step-by-step"), or they are a contraction said in full ("i am" for
-    /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5"), or a
-    /// short form read in full, or digits and a scale word ("2 million" for
-    /// "2M", "3 times" for "3x").
+    /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5", "5 to
+    /// 10000" for "$5-10k"), or a short form read in full, or digits and a
+    /// scale word ("2 million" for "2M", "3 times" for "3x").
     static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
         let said = words.joined(separator: " ")
         if spokenExpansions[script]?.contains(said) == true { return true }
@@ -1202,7 +1202,7 @@ class SpeechRecognizer {
            spokenExpansions[String(script.dropLast())]?.contains(where: { $0 + "s" == said }) == true { return true }
         if words.count == 2, let first = words.first, first.allSatisfy(\.isNumber),
            let letter = scaleLetters[words.last!], first + letter == script { return true } // "2 million" for "2M"
-        if words.count == 3, rangeDigits(words) == script { return true }
+        if words.count == 3, rangeDigits(words) == script || rangeScaled(words) == script { return true }
         if words.count == 3, words[words.startIndex + 1] == "and",
            words.first! + words.last! == script { return true } // "q and a" for "Q&A"
         guard words.count >= 2 else { return false }
@@ -1212,14 +1212,15 @@ class SpeechRecognizer {
         return contractionEnds[String(script.dropFirst(first.count))]?.contains(last) == true
     }
 
-    /// A range said with "to" ("3 to 5", "three to five") as the script word
-    /// of a range in digits ("3-5" is "35" as letters and digits), or its
-    /// start ("3 to" is "3"). The end can carry a unit: "3 to 5k", "4 to 6
-    /// pm", "2 to 3 times" are "35k", "46pm", "23x" (see `scaleLetters`).
+    /// A range said with "to" or "or" ("3 to 5", "three to five", "two or
+    /// three") as the script word of a range in digits ("3-5" is "35" as
+    /// letters and digits), or its start ("3 to" is "3"). The end can carry
+    /// a unit: "3 to 5k", "4 to 6 pm", "2 to 3 times" are "35k", "46pm",
+    /// "23x" (see `scaleLetters`).
     static func rangeDigits(_ words: ArraySlice<String>) -> String? {
         func digits(_ w: String) -> String? { w.allSatisfy(\.isNumber) ? w : numberValue(w).map { String($0) } }
         let s = words.startIndex
-        guard (2...4).contains(words.count), words[s + 1] == "to", let a = digits(words[s]) else { return nil }
+        guard (2...4).contains(words.count), ["to", "or"].contains(words[s + 1]), let a = digits(words[s]) else { return nil }
         guard words.count > 2 else { return a }
         let end = words[s + 2]
         if words.count == 4 {
@@ -1229,6 +1230,27 @@ class SpeechRecognizer {
         if let b = digits(end) { return a + b }
         let b = end.prefix { $0.isNumber } // "5k"
         return !b.isEmpty && end.dropFirst(b.count).allSatisfy(\.isLetter) ? a + end : nil
+    }
+
+    /// A range with the scale on its end said as a full number or a letter
+    /// (with "to" or "or"): "5 to 10000", "5000 to 10000", "3k to 5k" are
+    /// "510k", "510k", "35k"; "1 to 2000000" is "12m". The start has no
+    /// letter, or the same letter as the end.
+    static func rangeScaled(_ words: ArraySlice<String>) -> String? {
+        func short(_ w: String) -> (n: String, l: String?)? {
+            let n = w.prefix { $0.isNumber }, rest = w.dropFirst(n.count)
+            guard !n.isEmpty else { return nil }
+            if rest.isEmpty {
+                if n.count > 6, n.hasSuffix("000000") { return (String(n.dropLast(6)), "m") }
+                if n.count > 3, n.hasSuffix("000") { return (String(n.dropLast(3)), "k") }
+                return (String(n), nil)
+            }
+            return ["k", "m", "b"].contains(rest) ? (String(n), String(rest)) : nil
+        }
+        let s = words.startIndex
+        guard words.count == 3, ["to", "or"].contains(words[s + 1]), let a = short(words[s]), let b = short(words[s + 2]),
+              let l = b.l, a.l == nil || a.l == l else { return nil }
+        return a.n + b.n + l
     }
 
     /// `spoken` with each 2 or 3 words in a row that say one word of `script`

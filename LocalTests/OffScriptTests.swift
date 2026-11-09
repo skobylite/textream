@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions scaleLetters hasRun spokenNumberForms
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions scaleLetters hasRun spokenNumberForms rangeScaled
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -358,6 +358,52 @@ check("'from four to six on Tuesdays' read for 'from 4-6pm on Tuesdays' is not o
       !offScript(tuesdays, held: startOf("4-6pm", in: tuesdays), "from four to six on tuesdays"))
 check("'three to five per client' read for '$3-5k per client' is not off script",
       !offScript(coach, held: startOf("$3-5k", in: coach), "charge three to five per client"))
+check("a range without its unit joins only as 3 words ('3 to' alone does not join '3x')",
+      SR.joinSpokenForms(said("go 3 to 4 times"), script: ["get", "a", "3x", "return"]) == said("go 3 to 4 times"))
+check("a range without its unit joins only a unit of letters ('3 to 5' does not join '350')",
+      SR.joinSpokenForms(said("charge 3 to 5 per"), script: ["charge", "350", "per"]) == said("charge 3 to 5 per"))
+
+// A money range with the scale written as a full number or on both ends (r5:
+// "five to ten thousand" for "$5-10k" written "5 to 10,000" by the recogniser
+// gave "510000", not "510k", so the highlight held for 3 words).
+let fees = "Most clients charge $5-10k per project and $3-5k per month, and a few reach $1-2M a year."
+check("'5 to 10,000' read for '$5-10k' joins '510k'",
+      SR.joinSpokenForms(said("charge 5 to 10,000 per"), script: said(fees)) == ["charge", "510k", "per"])
+check("'5 or 10,000' read for '$5-10k' joins '510k'",
+      SR.joinSpokenForms(said("charge 5 or 10,000 per"), script: said(fees)) == ["charge", "510k", "per"])
+check("'$5000 to $10,000' read for '$5-10k' joins '510k'",
+      SR.joinSpokenForms(said("charge $5000 to $10,000 per"), script: said(fees)) == ["charge", "510k", "per"])
+check("'5K to 10K' read for '$5-10k' joins '510k'",
+      SR.joinSpokenForms(said("charge 5K to 10K per"), script: said(fees)) == ["charge", "510k", "per"])
+check("'3 to 5000' read for '$3-5k' joins '35k'",
+      SR.joinSpokenForms(said("and 3 to 5000 per"), script: said(fees)) == ["and", "35k", "per"])
+check("'$3000 to $5000' read for '$3-5k' joins '35k'",
+      SR.joinSpokenForms(said("and $3000 to $5000 per"), script: said(fees)) == ["and", "35k", "per"])
+check("'3K to 5K' read for '$3-5k' joins '35k'",
+      SR.joinSpokenForms(said("and 3K to 5K per"), script: said(fees)) == ["and", "35k", "per"])
+check("'$1,000,000 to $2,000,000' read for '$1-2M' joins '12m'",
+      SR.joinSpokenForms(said("reach $1,000,000 to $2,000,000 a"), script: said(fees)) == ["reach", "12m", "a"])
+check("'5 to 10,000 per project' read for '$5-10k per project' is not off script",
+      !offScript(fees, held: startOf("$5-10k", in: fees), "charge 5 to 10,000 per"))
+check("'3K to 5K per month' read for '$3-5k per month' is not off script",
+      !offScript(fees, held: startOf("$3-5k", in: fees), "and 3K to 5K per"))
+check("a range with another letter on each end does not join ('3K to 5M' is not '35k' or '35m')",
+      SR.joinSpokenForms(said("and 3K to 5M per"), script: ["and", "35k", "35m", "per"]) == said("and 3k to 5m per"))
+check("a range with a full number on its end and no script range for it stays as said",
+      SR.joinSpokenForms(said("charge 5 to 10,000 per"), script: ["charge", "510", "per"]) == said("charge 5 to 10000 per"))
+check("an ad-lib with a range written in full is still off script",
+      offScript(fees, held: startOf("$3-5k", in: fees), "we did 3 to 5000 posts last year honestly"))
+
+// "or" for the range dash ("one or two calls" for "1-2 calls").
+let calls = "Book 1-2 calls a week and do 2-3x more outreach on the other days."
+check("'one or two' read for '1-2' joins '12'",
+      SR.joinSpokenForms(said("book one or two calls"), script: said(calls)) == ["book", "12", "calls"])
+check("'one or two calls' read for '1-2 calls' is not off script",
+      !offScript(calls, held: startOf("1-2", in: calls), "book one or two calls"))
+check("'two or three times' read for '2-3x' is not off script",
+      !offScript(calls, held: startOf("2-3x", in: calls), "do two or three times more"))
+check("'one or two' read as written in the script stays as it is",
+      SR.joinSpokenForms(said("book one or two calls"), script: said("Book one or two calls, or 1-2 demos")) == said("book one or two calls"))
 
 // A number said in words joins the script number with its value (r4 round 1:
 // "two thousand five hundred" took the "k" of "thousand" and joined "$20k").
