@@ -1,5 +1,5 @@
 // extract: Textream/Textream/SharedScrollProgress.swift ScrollProgressMath charOffset wordProgress shouldAdvance tickStep
-// extract: Textream/Textream/MarqueeTextView.swift Scroll readingLineY smoothReadingAnchor wordProgress smoothReleaseKeepsWord smoothLayoutY perWordMidYs ScrollEndTiming scrollEndTiming
+// extract: Textream/Textream/MarqueeTextView.swift Scroll readingLineY smoothReadingAnchor smoothCenteredTarget smoothReadLineY wordProgress smoothReleaseKeepsWord smoothLayoutY perWordMidYs ScrollEndTiming scrollEndTiming
 // Regression tests for the shared Classic/Voice-Activated reading position
 // (SharedScrollProgress) and the smooth-scroll reading line (SpeechScrollView).
 import Foundation
@@ -145,8 +145,12 @@ for h: CGFloat in [102, 300, 968] {
           Scroll.readingLineY(containerHeight: h, smoothScroll: true, nearTop: true, topAnchor: 33) == 33
           && Scroll.readingLineY(containerHeight: h, smoothScroll: false, nearTop: true, topAnchor: 33) == 33)
 }
-check("smooth anchor of 102 pt is 82", Scroll.smoothReadingAnchor(containerHeight: 102) == 82)
-check("smooth anchor of 968 pt is 948", Scroll.smoothReadingAnchor(containerHeight: 968) == 948)
+check("smooth anchor of 102 pt is 81.6", near(Scroll.smoothReadingAnchor(containerHeight: 102), 81.6))
+check("smooth anchor of 968 pt is 774.4", near(Scroll.smoothReadingAnchor(containerHeight: 968), 774.4))
+check("every height up to 100 pt has its smooth anchor 20 pt from the bottom",
+      stride(from: 20.0, through: 100.0, by: 0.5).allSatisfy { Scroll.smoothReadingAnchor(containerHeight: $0) == $0 - 20 })
+check("every height over 100 pt has its smooth anchor at 0.8h",
+      stride(from: 100.5, through: 2000.0, by: 0.5).allSatisfy { near(Scroll.smoothReadingAnchor(containerHeight: $0), $0 * 0.8, 0.0001) })
 
 // MARK: 4 and 5. A scroll release reads the word at the reading line
 
@@ -192,9 +196,53 @@ for p in ps {
 // The old release read at h/2, so it lost many words on a tall screen.
 for p in ps where p >= 24 {
     let offset = anchor - y(p, external)
-    check("C2: the old read at h/2 is more than 15 words off at progress \(p)",
-          abs(read(h / 2 - offset, external) - p) > 15)
+    check("C2: the old read at h/2 is more than 10 words off at progress \(p)",
+          abs(read(h / 2 - offset, external) - p) > 10)
 }
+
+// MARK: The start clamp
+
+// The External: 968 pt high, 123 pt rows, 5 words a row, line 0 starts at 422.
+let top: CGFloat = 422
+check("tracking never puts the text lower than its start offset",
+      ps.allSatisfy { Scroll.smoothCenteredTarget(anchor: anchor, wordY: y($0, external), topOffset: top) <= top })
+check("past the first rows, tracking puts the word on the reading line",
+      [24.25, 39.5].allSatisfy {
+          Scroll.smoothCenteredTarget(anchor: anchor, wordY: y($0, external), topOffset: top) == anchor - y($0, external)
+      })
+check("at the start of the page the text stays at its start offset",
+      [0, 4.5, 10].allSatisfy { Scroll.smoothCenteredTarget(anchor: anchor, wordY: y($0, external), topOffset: top) == top })
+check("with no clamp, a release reads at the reading line",
+      Scroll.smoothReadLineY(anchor: anchor, wordY: y(39.5, external), topOffset: top) == anchor
+      && Scroll.smoothReadLineY(anchor: anchor, wordY: nil, topOffset: top) == anchor)
+for p in ps {
+    // The release reads where the word is on screen, so every word (also
+    // one held by the clamp) comes back at its own Y.
+    let offset = Scroll.smoothCenteredTarget(anchor: anchor, wordY: y(p, external), topOffset: top)
+    let line = Scroll.smoothReadLineY(anchor: anchor, wordY: y(p, external), topOffset: top)
+    check("a release with no move at progress \(p) reads the screen position of the word back",
+          near(Double(y(read(line - offset, external), external)), Double(y(p, external))))
+}
+for p in [0, 2, 4.5, 7, 10.0] {
+    let offset = Scroll.smoothCenteredTarget(anchor: anchor, wordY: y(p, external), topOffset: top)
+    let line = Scroll.smoothReadLineY(anchor: anchor, wordY: y(p, external), topOffset: top)
+    for d: CGFloat in [-20, -60, -123] {
+        // A scroll of d px moves the read place by d px through the text,
+        // as on a screen that the clamp does not hold.
+        let readY = line - (offset + d)
+        check("a \(Int(d)) px release during the start clamp at progress \(p) moves the word by \(Int(-d)) px",
+              near(Double(y(read(readY, external), external)), Double(y(p, external) - d)))
+        // The bug: a read at the reading line jumps ahead by the distance
+        // between the held word and the line (45 to 291 px here).
+        check("the bug: a \(Int(d)) px release read at the reading line at progress \(p) jumps ahead",
+              y(read(anchor - (offset + d), external), external) > y(p, external) - d + 40)
+    }
+}
+check("a 20 px nudge during the start clamp keeps the word",
+      Scroll.smoothReleaseKeepsWord(
+          manualOffset: -20, minimumMove: 8,
+          readY: Scroll.smoothReadLineY(anchor: anchor, wordY: y(4.5, external), topOffset: top) - (top - 20),
+          wordY: y(4.5, external), rowAdvance: 123))
 
 let layouts: [(String, [(Int, CGFloat)])] = [
     ("5 words a row, 32 pt rows", layout(perRow: 5, rowHeight: 32, words: 50)),

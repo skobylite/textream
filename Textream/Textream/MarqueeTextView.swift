@@ -406,7 +406,7 @@ struct SpeechScrollView: View {
                             if Self.smoothReleaseKeepsWord(
                                 manualOffset: manualOffset,
                                 minimumMove: minimumPeekOffset,
-                                readY: activeReadingLineY(containerHeight: containerHeight) - (scrollOffset + manualOffset),
+                                readY: releaseReadLineY() - (scrollOffset + manualOffset),
                                 wordY: layoutY(forWordProgress: smoothWordProgress),
                                 rowAdvance: WordFlowLayout.rowHeight(for: font) + WordFlowLayout.lineSpacing(for: font)
                             ) {
@@ -558,7 +558,11 @@ struct SpeechScrollView: View {
             // The line layout gives the word also when its line is culled.
             guard let interpolatedY = layoutY(forWordProgress: smoothWordProgress) else { return }
             applyTrackingTarget(
-                activeReadingLineY(containerHeight: containerHeight) - interpolatedY,
+                Self.smoothCenteredTarget(
+                    anchor: activeReadingLineY(containerHeight: containerHeight),
+                    wordY: interpolatedY,
+                    topOffset: initialScrollOffset(containerHeight: containerHeight)
+                ),
                 followsBack: highlightMovedBack
             )
         } else {
@@ -625,9 +629,44 @@ struct SpeechScrollView: View {
         )
     }
 
+    /// The height in this view where a smooth scroll release reads the word:
+    /// the reading line, or the current word while the start clamp of
+    /// smoothCenteredTarget holds the text.
+    private func releaseReadLineY() -> CGFloat {
+        let line = activeReadingLineY(containerHeight: containerHeight)
+        guard smoothScroll, readingPosition == .centered else { return line }
+        return Self.smoothReadLineY(
+            anchor: line,
+            wordY: layoutY(forWordProgress: smoothWordProgress),
+            topOffset: initialScrollOffset(containerHeight: containerHeight)
+        )
+    }
+
     /// Classic and Voice-Activated, Centered: the active word sits this high.
+    /// 0.8h on every screen taller than 100 pt, so the notch, the floating
+    /// window and the External read at the same height. 20 pt from the bottom
+    /// on smaller screens.
     static func smoothReadingAnchor(containerHeight: CGFloat) -> CGFloat {
-        containerHeight - 20
+        containerHeight - max(20, containerHeight * 0.2)
+    }
+
+    /// Classic and Voice-Activated, Centered: the scroll offset that puts a
+    /// word at layout Y `wordY` on the reading line `anchor`, but never lower
+    /// than the start offset `topOffset`. At the start of a page the text
+    /// stays with line 0 near the centre, and it starts to move when the word
+    /// reaches the reading line.
+    static func smoothCenteredTarget(anchor: CGFloat, wordY: CGFloat, topOffset: CGFloat) -> CGFloat {
+        min(anchor - wordY, topOffset)
+    }
+
+    /// Classic and Voice-Activated, Centered: the screen height where a scroll
+    /// release reads the word. While smoothCenteredTarget holds the text at
+    /// `topOffset`, the current word (layout Y `wordY`) sits above `anchor`, at
+    /// wordY + topOffset. A release reads there, so it does not jump forward
+    /// by the rows between the word and the reading line.
+    static func smoothReadLineY(anchor: CGFloat, wordY: CGFloat?, topOffset: CGFloat) -> CGFloat {
+        guard let wordY else { return anchor }
+        return min(anchor, wordY + topOffset)
     }
 
     /// The one reading line of a view: the line that tracking puts the active
@@ -702,6 +741,12 @@ struct SpeechScrollView: View {
 
         let target: CGFloat
         switch readingPosition {
+        case .centered where smoothScroll:
+            target = Self.smoothCenteredTarget(
+                anchor: activeReadingLineY(containerHeight: containerHeight),
+                wordY: wordY,
+                topOffset: initialScrollOffset(containerHeight: containerHeight)
+            )
         case .centered:
             target = activeReadingLineY(containerHeight: containerHeight) - wordY
         case .nearTop:
@@ -800,7 +845,7 @@ struct SpeechScrollView: View {
 
     /// Find the word progress at the current visual position (scrollOffset + manualOffset)
     private func wordProgressAtCurrentOffset() -> Double {
-        let targetY = activeReadingLineY(containerHeight: containerHeight) - (scrollOffset + manualOffset)
+        let targetY = releaseReadLineY() - (scrollOffset + manualOffset)
         // The line layout has every word, also on culled lines. The measured
         // positions are a fallback before the view has a width.
         let positions: [(Int, CGFloat)]
