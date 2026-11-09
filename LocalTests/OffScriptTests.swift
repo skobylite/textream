@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue isNumberWord numberMatch soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions hasRun
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions hasRun
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -139,6 +139,42 @@ check("numberMatch: digits that start with the word's value",
       && SR.numberMatch("twentyfour", "24") && SR.numberMatch("third", "3rd"))
 check("numberMatch: other numbers and words do not match",
       !SR.numberMatch("ten", "12") && !SR.numberMatch("ten", "twelve") && !SR.numberMatch("ten", "then"))
+// Compound numbers without a hyphen, "and" inside a number, times and ranges
+// (r3 repair: "25" did not fit "twenty", the number run stopped at "and", and
+// "3 to 5" was 3 words for the script word "3-5", so the highlight held).
+let compound = "Our close rate went from twenty five to seventy five percent in forty five days, and our churn fell."
+check("'25 to 75% in 45' heard for 'twenty five to seventy five percent in forty five' is not off script",
+      !offScript(compound, held: startOf("seventy", in: compound), "went from 25 to 75%")
+      && !offScript(compound, held: startOf("forty", in: compound), "25 to 75% in 45"))
+check("numberMatch: a tens word fits a 2-digit number with its tens digit",
+      SR.numberMatch("twenty", "25") && SR.numberMatch("45", "forty") && !SR.numberMatch("twenty", "35")
+      && !SR.numberMatch("twenty", "2"))
+let session = "Book your call at 9am or 2:30pm on the 21st, and the session runs 45 minutes with a short break."
+check("'nine am or two thirty pm on the twenty first' read for '9am or 2:30pm on the 21st' is not off script",
+      !offScript(session, held: startOf("2:30pm", in: session), "at nine am or two thirty pm")
+      && !offScript(session, held: startOf("21st", in: session), "pm on the twenty first and"))
+check("joinSpokenForms joins 'twenty first' into '21st', not into the earlier '2:30pm'",
+      SR.joinSpokenForms(said("at two thirty pm on the twenty first and"), script: said("at 2:30pm on the 21st and"))
+      == said("at 230pm on the 21st and"))
+check("'forty five' read for '45' is not off script",
+      !offScript(session, held: startOf("45", in: session), "the session runs forty five minutes"))
+let price = "It costs $497 a month, which is less than an agency."
+check("joinSpokenForms joins a number with 'and' in it ('four hundred and ninety seven dollars')",
+      SR.joinSpokenForms(said("costs four hundred and ninety seven dollars a"), script: said("costs $497 a"))
+      == said("costs 497 a"))
+check("'four hundred and ninety seven dollars' read for '$497' is not off script",
+      !offScript(price, held: startOf("$497", in: price), "costs four hundred and ninety seven dollars a"))
+let ranges = "Post 3-5 times a week for 6-8 days and you should see 2-3 new leads a day."
+check("'3 to 5' and 'six to eight' heard for '3-5' and '6-8' are not off script",
+      !offScript(ranges, held: startOf("3-5", in: ranges), "post 3 to 5 times a")
+      && !offScript(ranges, held: startOf("6-8", in: ranges), "a week for six to eight days"))
+check("the start of a range ('for 6 to') is not off script",
+      !offScript(ranges, held: startOf("6-8", in: ranges), "a week for 6 to"))
+check("an ad-lib with another range is still off script",
+      offScript(ranges, held: startOf("3-5", in: ranges), "we did 7 to 9 posts daily"))
+check("support: 'week for 6 to 8' moves on to '6-8'",
+      SR.supportEnd(source: ranges, spoken: said("week for 6 to 8"), current: startOf("for 6-8", in: ranges),
+                    candidate: startOf("for 6-8", in: ranges), matches: eq)?.end == endOf("6-8", in: ranges))
 // Words read as written are not joined into a compound (r3: "every day" was
 // joined into "everyday", so support ended on the wrong word).
 check("joinSpokenForms keeps 'every day' when the script has it as 2 words",

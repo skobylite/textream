@@ -1023,8 +1023,8 @@ class SpeechRecognizer {
 
     // MARK: Words the recogniser writes in another form
 
-    /// Units said with a number ("forty percent", "ninety nine dollars").
-    static let numberUnits: Set<String> = ["percent", "dollars", "dollar", "pounds", "pound", "euros", "euro", "cents", "k", "grand"]
+    /// Units said with a number ("forty percent", "ninety nine dollars", "nine am").
+    static let numberUnits: Set<String> = ["percent", "dollars", "dollar", "pounds", "pound", "euros", "euro", "cents", "k", "grand", "am", "pm"]
     /// The values of number words: zero to nineteen, the tens, hundred to
     /// billion, and the ordinals first to twelfth, twentieth and thirtieth.
     static let numberValues: [String: Int] = {
@@ -1052,16 +1052,29 @@ class SpeechRecognizer {
         return nil
     }
 
+    /// The digits that a number said in words starts with: "21" for "twenty
+    /// one", "4" for "four hundred", "20" for "twenty twenty four".
+    static func numberStart(_ words: ArraySlice<String>) -> String? {
+        guard let first = words.first, let v = numberValue(first) else { return nil }
+        if numberTens.contains(first), words.count >= 2, let u = numberValue(words[words.startIndex + 1]),
+           (1...9).contains(u) { return String(v + u) }
+        return String(v)
+    }
+
     /// A number word or a unit said with a number.
     static func isNumberWord(_ w: String) -> Bool { numberUnits.contains(w) || numberValue(w) != nil }
 
     /// A number word and a number in digits, either way round, when the
     /// digits start with the word's value ("40" for "forty", "2024" for
-    /// "twenty", "3rd" for "third"), so "12" is not "ten".
+    /// "twenty", "3rd" for "third"), so "12" is not "ten". A tens word fits
+    /// 2 or more digits that start with its tens digit ("25" for "twenty" in
+    /// "twenty five").
     static func numberMatch(_ script: String, _ spoken: String) -> Bool {
         func fits(_ digits: String, _ word: String) -> Bool {
             guard hasDigit(digits), let v = numberValue(word) else { return false }
-            return digits.filter { $0.isNumber }.hasPrefix(String(v))
+            let d = digits.filter { $0.isNumber }
+            if numberTens.contains(word) { return d.count >= 2 && d.first == String(v).first }
+            return d.hasPrefix(String(v))
         }
         return fits(spoken, script) || fits(script, spoken)
     }
@@ -1149,9 +1162,10 @@ class SpeechRecognizer {
     /// True when spoken `words` say the script word `script` as more words:
     /// joined they are the script word ("c r m" for "CRM", "step by step" for
     /// "step-by-step"), or they are a contraction said in full ("i am" for
-    /// "I'm", "do not" for "don't").
+    /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5").
     static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
         if spokenExpansions[script]?.contains(words.joined(separator: " ")) == true { return true }
+        if words.count == 3, rangeDigits(words) == script { return true }
         if words.count == 3, words[words.startIndex + 1] == "and",
            words.first! + words.last! == script { return true } // "q and a" for "Q&A"
         guard words.count >= 2 else { return false }
@@ -1159,6 +1173,17 @@ class SpeechRecognizer {
         guard words.count == 2, let first = words.first, let last = words.last,
               first.count < script.count, script.hasPrefix(first) else { return false }
         return contractionEnds[String(script.dropFirst(first.count))]?.contains(last) == true
+    }
+
+    /// A range said with "to" ("3 to 5", "three to five") as the script word
+    /// of a range in digits ("3-5" is "35" as letters and digits), or its
+    /// start ("3 to" is "3").
+    static func rangeDigits(_ words: ArraySlice<String>) -> String? {
+        func digits(_ w: String) -> String? { w.allSatisfy(\.isNumber) ? w : numberValue(w).map { String($0) } }
+        guard (2...3).contains(words.count), words[words.startIndex + 1] == "to",
+              let a = digits(words.first!) else { return nil }
+        guard words.count == 3 else { return a }
+        return digits(words.last!).map { a + $0 }
     }
 
     /// `spoken` with each 2 or 3 words in a row that say one word of `script`
@@ -1172,9 +1197,16 @@ class SpeechRecognizer {
             var joined: (word: String, count: Int)?
             // A number said in words ("two thousand five hundred dollars") for a
             // script number in digits ("$2,500"): the whole run of number words.
-            if isNumberWord(spoken[i]), !numberUnits.contains(spoken[i]),
-               let w = script.first(where: { hasDigit($0) && numberMatch($0, spoken[i]) }) {
-                let run = spoken[i...].prefix(while: { isNumberWord($0) }).count
+            if isNumberWord(spoken[i]), !numberUnits.contains(spoken[i]), let start = numberStart(spoken[i...]),
+               let w = script.first(where: { hasDigit($0) && $0.filter(\.isNumber).hasPrefix(start) }) {
+                var run = 1
+                while i + run < spoken.count {
+                    // "and" inside a number ("four hundred and ninety seven").
+                    let and = spoken[i + run] == "and" && ["hundred", "thousand", "million"].contains(spoken[i + run - 1])
+                        && i + run + 1 < spoken.count && numberValue(spoken[i + run + 1]) != nil
+                    guard isNumberWord(spoken[i + run]) || and else { break }
+                    run += and ? 2 : 1
+                }
                 if run >= 2 { joined = (w, run) }
             }
             for k in stride(from: spokenFormMaxWords, through: 1, by: -1) where joined == nil && i + k <= spoken.count {
@@ -1183,8 +1215,10 @@ class SpeechRecognizer {
                 // "everyday") stay as they are.
                 if k >= 2, hasRun(script, group) { continue }
                 let atEnd = partialEnd && k >= 2 && i + k == spoken.count
-                if let w = script.first(where: { isSpokenForm($0, group)
-                    || (atEnd && $0.count > group.joined().count && $0.hasPrefix(group.joined())) }) {
+                let rangeStart = atEnd && k == 2 ? rangeDigits(group) : nil
+                if let w = script.first(where: { s in isSpokenForm(s, group)
+                    || (atEnd && s.count > group.joined().count && s.hasPrefix(group.joined()))
+                    || (rangeStart.map { s.count > $0.count && s.hasPrefix($0) && s.allSatisfy(\.isNumber) } ?? false) }) {
                     joined = (w, k)
                     break
                 }
