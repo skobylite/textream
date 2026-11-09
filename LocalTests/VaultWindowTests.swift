@@ -95,6 +95,12 @@ check("the toolbar's unsaved dot uses hasUnsavedChanges",
       contentSource.contains("service.currentFileURL != nil && service.hasUnsavedChanges")
       && !contentSource.contains("service.pages != service.savedPages"))
 
+// A file or text sent from Alfred or Finder opens in the main window. Without
+// this, SwiftUI opened a second main window for each one.
+let appSource = (try? String(contentsOfFile: "Textream/Textream/TextreamApp.swift", encoding: .utf8)) ?? ""
+check("the main window group does not open a new window for files and links",
+      appSource.contains(".handlesExternalEvents(matching: [])"))
+
 // Text set by the app removes the undo steps of the old text (finding 6).
 // Without this, Cmd-Z replays old typing at old positions in a vault note.
 let app = NSApplication.shared

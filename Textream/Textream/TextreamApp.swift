@@ -178,6 +178,10 @@ struct TextreamApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+        // Files and links sent to Textream go to AppDelegate.application(_:open:)
+        // in the open window. Without this, SwiftUI opens a second main window
+        // for each one.
+        .handlesExternalEvents(matching: [])
 
         .commands {
             CommandGroup(replacing: .appInfo) {
