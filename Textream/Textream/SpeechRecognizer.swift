@@ -1154,17 +1154,27 @@ class SpeechRecognizer {
 
     /// The most spoken words that can stand for one script word.
     static let spokenFormMaxWords = 3
-    /// Short forms that are read in full ("i.e." as "that is").
-    static let spokenExpansions: [String: Set<String>] = ["ie": ["that is"], "eg": ["for example", "for instance"], "etc": ["et cetera", "and so on"], "vs": ["versus"], "dr": ["doctor"], "mr": ["mister"], "mrs": ["missus", "misses"], "aka": ["also known as"], "diy": ["do it yourself"], "fyi": ["for your information"]]
+    /// Short forms that are read in full ("i.e." as "that is", "DFY" as
+    /// "done for you"). A plural short form ("KPIs") is its words with "s".
+    static let spokenExpansions: [String: Set<String>] = ["ie": ["that is"], "eg": ["for example", "for instance"], "etc": ["et cetera", "and so on"], "vs": ["versus"], "dr": ["doctor"], "mr": ["mister"], "mrs": ["missus", "misses"], "aka": ["also known as"], "diy": ["do it yourself"], "fyi": ["for your information"], "dfy": ["done for you"], "dwy": ["done with you"], "cta": ["call to action"], "ctas": ["calls to action"], "va": ["virtual assistant"], "roi": ["return on investment"], "sop": ["standard operating procedure"], "kpi": ["key performance indicator"]]
+    /// Scale words said after digits for a short scale letter ("$2M" heard
+    /// as "$2 million").
+    static let scaleLetters: [String: String] = ["thousand": "k", "million": "m", "billion": "b"]
     /// The ends of contractions (letters only) and the words they stand for.
     static let contractionEnds: [String: Set<String>] = ["m": ["am"], "s": ["is", "has", "us"], "ve": ["have"], "re": ["are"], "ll": ["will"], "d": ["would", "had"], "t": ["not"], "nt": ["not"]]
 
     /// True when spoken `words` say the script word `script` as more words:
     /// joined they are the script word ("c r m" for "CRM", "step by step" for
     /// "step-by-step"), or they are a contraction said in full ("i am" for
-    /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5").
+    /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5"), or a
+    /// short form read in full, or digits and a scale word ("2 million" for "2M").
     static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
-        if spokenExpansions[script]?.contains(words.joined(separator: " ")) == true { return true }
+        let said = words.joined(separator: " ")
+        if spokenExpansions[script]?.contains(said) == true { return true }
+        if script.count > 2, script.hasSuffix("s"),
+           spokenExpansions[String(script.dropLast())]?.contains(where: { $0 + "s" == said }) == true { return true }
+        if words.count == 2, let first = words.first, first.allSatisfy(\.isNumber),
+           let letter = scaleLetters[words.last!], first + letter == script { return true } // "2 million" for "2M"
         if words.count == 3, rangeDigits(words) == script { return true }
         if words.count == 3, words[words.startIndex + 1] == "and",
            words.first! + words.last! == script { return true } // "q and a" for "Q&A"

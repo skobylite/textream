@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions hasRun
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions scaleLetters hasRun
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -271,6 +271,38 @@ check("a misheard newest word lets the move go one word further",
 check("support skips stage directions",
       SR.supportEnd(source: launch, spoken: said("at all we"), current: held, candidate: held, matches: eq)?.end
       == endOf("[smile] We", in: launch))
+
+// Scale words after digits ("$2M" heard as "$2 million").
+check("isSpokenForm: '2 million' for '2m'", SR.isSpokenForm("2m", said("$2 million")[...]))
+check("isSpokenForm: '1.5 million' for '1.5M'", SR.isSpokenForm("15m", said("$1.5 million")[...]))
+check("isSpokenForm: '10 thousand' for '10k', '3 billion' for '3b'",
+      SR.isSpokenForm("10k", said("10 thousand")[...]) && SR.isSpokenForm("3b", said("3 billion")[...]))
+check("isSpokenForm: '2 million' is not '3m' or '2k'",
+      !SR.isSpokenForm("3m", said("2 million")[...]) && !SR.isSpokenForm("2k", said("2 million")[...]))
+let sales = "We hit $10K a month in March, $2M in total sales by year two, and 100K followers on Instagram."
+check("'$2 million' heard for '$2M' is not off script",
+      !offScript(sales, held: startOf("$2M", in: sales), "march 2 million in total"))
+check("support: '$2 million in total' moves on to 'total'",
+      SR.supportEnd(source: sales, spoken: said("$2 million in total"), current: startOf("$2M", in: sales),
+                    candidate: startOf("$2M", in: sales), matches: eq)?.end == endOf("in total", in: sales))
+check("an ad-lib about 2 million views is still off script",
+      offScript(sales, held: startOf("$2M", in: sales), "we got 2 million views on youtube"))
+
+// Short forms read in full ("DFY" as "done for you").
+check("isSpokenForm: 'done for you' for 'dfy', 'virtual assistant' for 'va'",
+      SR.isSpokenForm("dfy", said("done for you")[...]) && SR.isSpokenForm("va", said("virtual assistant")[...]))
+check("isSpokenForm: 'key performance indicators' for 'KPIs'", SR.isSpokenForm("kpis", said("key performance indicators")[...]))
+check("isSpokenForm: 'done for me' is not 'dfy'", !SR.isSpokenForm("dfy", said("done for me")[...]))
+let offer = "Our DFY package has a clear ROI, a strong CTA on every page, and an SOP for each VA on the team."
+check("'done for you' read for 'DFY' is not off script",
+      !offScript(offer, held: startOf("DFY", in: offer), "our done for you package"))
+check("'call to action' read for 'CTA' is not off script",
+      !offScript(offer, held: startOf("CTA", in: offer), "a strong call to action on"))
+check("support: 'virtual assistant on the' moves on to 'the'",
+      SR.supportEnd(source: offer, spoken: said("each virtual assistant on the"), current: startOf("VA", in: offer),
+                    candidate: startOf("VA", in: offer), matches: eq)?.end == endOf("on the", in: offer))
+check("an ad-lib with 'done for you' words is still off script",
+      offScript(offer, held: startOf("DFY", in: offer), "i have done this for years now"))
 
 // Helpers.
 check("inOrderHits counts the longest in-order match", SR.inOrderHits(said("a x b c"), said("a b c d"), matches: eq) == 3)
