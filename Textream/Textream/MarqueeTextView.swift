@@ -212,6 +212,11 @@ struct SpeechScrollView: View {
     /// Word Tracking: true while the last glide of the base used the quick
     /// spring.
     @State private var lastGlideWasQuick = false
+    /// Word Tracking: the peekResetGeneration of the last 6 s glide-back
+    /// timer that fired. The timer runs on an old copy of this view, so it
+    /// only writes this value. Its onChange ends the look-around with the
+    /// current highlight and layout.
+    @State private var firedGlideBackTimer = 0
 
     private var readingPositionTransitionAnimation: Animation? {
         guard let duration = readingPositionTransitionDuration, duration > 0 else {
@@ -382,6 +387,13 @@ struct SpeechScrollView: View {
             }
             .onChange(of: sharedProgress?.peek) { _, _ in
                 followSharedPeek()
+            }
+            .onChange(of: firedGlideBackTimer) { _, generation in
+                // The glide-back timer of this screen fired. A scroll, a tap,
+                // a pause or a resume since then starts or ends the
+                // look-around itself.
+                guard generation == peekResetGeneration else { return }
+                handlePeekEvent(.glideBackTimer)
             }
             .onChange(of: words) { _, _ in
                 scrollOffset = initialScrollOffset(containerHeight: containerHeight)
@@ -630,25 +642,14 @@ struct SpeechScrollView: View {
     /// peekResetGeneration, and that cancels this timer.
     private func schedulePeekGlideBack() {
         let generation = peekResetGeneration
-        // Captured now: after a page rebuild this copy's state can be stale.
-        let source = peekSourceID
-        let shared = sharedProgress
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
-            // Read only @State here. The plain properties of this copy still
-            // hold their values from when the timer started.
+            // Read and write only @State here. The plain properties of this
+            // copy still hold their values from when the timer started, also
+            // the highlight. The glide back aims at the tracked line, so the
+            // current view runs it: onChange(of: firedGlideBackTimer). The
+            // other screens glide back with this one.
             guard generation == peekResetGeneration else { return }
-            // The other screens glide back with this one. The timer runs
-            // only in live Word Tracking.
-            let decision = Self.peekDecision(
-                .glideBackTimer,
-                owner: Self.peekOwner(source: shared?.peek?.source, this: source),
-                smoothScroll: false,
-                isListening: true,
-                isFollowing: isFollowingPeek,
-                manualOffset: manualOffset
-            )
-            applyPeekMove(decision.move, peek: shared?.peek)
-            applyPeekClear(decision.clear, to: shared, source: source)
+            firedGlideBackTimer = generation
         }
     }
 

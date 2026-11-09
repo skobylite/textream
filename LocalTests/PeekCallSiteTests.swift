@@ -31,9 +31,9 @@ check("pause and resume are reported", count("handlePeekEvent(.listeningChanged"
 check("a closed screen clears its own look-around", count("handlePeekEvent(.disappear)") == 1)
 check("a scroll release asks the rules", count("peekDecision(.scrollEnded)") == 1)
 check("a late release from another screen is skipped", count("if peekEnd.skipsRelease { return }") == 1)
-check("the glide-back timer asks the rules", count(".glideBackTimer,") == 1)
-check("the glide-back timer clears the look-around",
-      count("applyPeekClear(decision.clear, to: shared, source: source)") == 1)
+// The timer only writes firedGlideBackTimer. The current view then asks the
+// rules, which glide back and clear the look-around (see ScrollTargetTests).
+check("the glide-back timer asks the rules", count("handlePeekEvent(.glideBackTimer)") == 1)
 check("a shared look-around change is followed",
       code.contains(".onChange(of: sharedProgress?.peek) { _, _ in\n                followSharedPeek()"))
 check("a scroll and a paused overscroll publish the look-around", count("publishSharedPeek()") == 3)

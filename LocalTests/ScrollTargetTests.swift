@@ -611,7 +611,9 @@ struct Prompter {
     }
 
     /// The glide back at the end of a look-around (glideBackToTrackedLine).
-    /// It first aims the base at the tracked line, with the text still.
+    /// It first aims the base at the tracked line, with the text still. The
+    /// current view runs it, also for the 6 s timer, so it aims at the
+    /// current highlight.
     mutating func glideBack(at time: Double) {
         if design == .fixed && reaims {
             follow(tracked, step: .still, allowsBack: reaimsBack, at: time)
@@ -1403,6 +1405,24 @@ check("a glide back starts the settle time",
 check("a glide back first aims the base at the tracked line, also back, in one transaction with animations off, and the peek offset takes up the move",
       has("private func glideBackToTrackedLine() {", "private func holdTextWhereShown() {",
           "isFollowingPeek = false var still = Transaction() still.disablesAnimations = true withTransaction(still) { let baseBefore = scrollOffset allowsNextBackwardTrackingUpdate = true recalculateTracking(containerHeight: containerHeight, step: .still) manualOffset -= scrollOffset - baseBefore } guard manualOffset != 0 else { return }"))
+// The 6 s glide-back timer runs on the copy of the view from the last
+// scroll. The plain properties of that copy (the highlight, the reading
+// position, the layout) are old, so the timer may use only @State. The
+// current view runs the glide back and its aim at the tracked line.
+let stateNames = Set(source.split(separator: "\n").compactMap { line -> String? in
+    let text = line.trimmingCharacters(in: .whitespaces)
+    guard text.hasPrefix("@State private var ") else { return nil }
+    return String(text.dropFirst("@State private var ".count).prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+})
+let timer = section("DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {", "private func glideBackToTrackedLine() {") ?? ""
+let timerNames = Set(timer.split { !($0.isLetter || $0.isNumber || $0 == "_") }.map(String.init))
+    .subtracting(["guard", "else", "return", "generation"])
+check("the glide-back timer uses only @State, because it runs on the copy of the view from the last scroll (old highlight and layout)",
+      !timer.isEmpty && timerNames.contains("firedGlideBackTimer") && timerNames.isSubset(of: stateNames))
+check("the current view glides back when its timer fired, unless a scroll, a tap or a pause came since",
+      code.contains(".onChange(of: firedGlideBackTimer) { _, generation in guard generation == peekResetGeneration else { return } handlePeekEvent(.glideBackTimer) }"))
+check("only the look-around rules on the current view run a glide back (applyPeekDecision)",
+      count("applyPeekMove(") == 2 && count("glideBackToTrackedLine()") == 2)
 check("Word Tracking keeps the word only for a nudge",
       has("private func scrollKeepsCurrentWord() -> Bool {", "static func trackingScrollKeepsWord(",
           "if !smoothScroll, layoutWidth > 0 { return Self.trackingScrollKeepsWord(manualOffset: manualOffset, minimumMove: minimumPeekOffset) }"))
