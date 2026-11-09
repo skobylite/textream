@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue isNumberWord numberMatch soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions hasRun
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -86,6 +86,68 @@ let atSarah = startOf("Sarah and", in: intro)
 check("support: 'hi i am sarah' moves on to 'Sarah'",
       SR.supportEnd(source: intro, spoken: said("hi i am sarah"), current: startOf("I'm Sarah", in: intro),
                     candidate: atSarah, matches: eq)?.end == endOf("Sarah", in: intro))
+
+// A name or brand heard as 2 or 3 other words, a short form read in full, and
+// a number in digits for a number in words (r3: each extra word counted as a
+// miss, so the highlight held for 3 to 8 words).
+let brands = "We built the whole thing on Shopify and Kajabi and my partner Siobhan ran the launch from her kitchen table in Dublin."
+check("'shop if i' heard for 'Shopify' is not off script",
+      !offScript(brands, held: startOf("Shopify", in: brands), "we built the whole thing on shop if i"))
+check("'car jabby' heard for 'Kajabi' is not off script",
+      !offScript(brands, held: startOf("Kajabi", in: brands), "on shopify and car jabby and my"))
+check("'she von' heard for 'Siobhan' is not off script",
+      !offScript(brands, held: startOf("Siobhan", in: brands), "and my partner she von ran the"))
+check("an ad-lib before a brand is still off script",
+      offScript(brands, held: startOf("Shopify", in: brands), "the whole thing on honestly we tried"))
+check("support: 'and car jabby and my' moves on to 'my'",
+      SR.supportEnd(source: brands, spoken: said("and car jabby and my"), current: startOf("Kajabi", in: brands),
+                    candidate: startOf("Kajabi", in: brands), matches: eq)?.matches == 3)
+check("alignSpoken puts the script word in for a group with a hit after it",
+      SR.alignSpoken(said("on shop if i and"), said("on shopify and kajabi"), countFrom: 0, matches: eq).words
+      == said("on shopify and"))
+check("alignSpoken: a group of words that are script words is not a name",
+      SR.alignSpoken(said("on and kajabi and"), said("on shopify and kajabi"), countFrom: 0, matches: eq).words
+      == said("on and kajabi and"))
+let shortForms = "Pick one channel, i.e. the one your clients use most, and post there daily: reels, stories, carousels, etc. Then compare reach vs. sales."
+check("'that is' read for 'i.e.' is not off script",
+      !offScript(shortForms, held: startOf("i.e.", in: shortForms), "pick one channel that is the one"))
+check("'et cetera' read for 'etc.' is not off script",
+      !offScript(shortForms, held: startOf("etc.", in: shortForms), "stories carousels et cetera then compare"))
+let example = "Pick one thing, e.g. a weekly live, and do it for ninety days."
+check("'for example' read for 'e.g.' is not off script",
+      !offScript(example, held: startOf("e.g.", in: example), "pick one thing for example a weekly"))
+check("isSpokenForm: 'versus' for 'vs'", SR.isSpokenForm("vs", ["versus"][...]))
+check("isSpokenForm: 'q and a' for 'qa'", SR.isSpokenForm("qa", ["q", "and", "a"][...]))
+let rates = "Our close rate went from ten percent to forty percent in six weeks once we started replying within one hour."
+check("'10% to 40%' heard for 'ten percent to forty percent' is not off script",
+      !offScript(rates, held: startOf("forty", in: rates), "rate went from 10% to 40%"))
+check("'40% in 6' heard for 'forty percent in six' is not off script",
+      !offScript(rates, held: startOf("six", in: rates), "from 10% to 40% in 6"))
+check("an ad-lib with another number is still off script",
+      offScript(rates, held: startOf("ten", in: rates), "went from 12 clients signed"))
+check("support: 'to 40% in 6' moves on to 'six'",
+      SR.supportEnd(source: rates, spoken: said("to 40% in 6"), current: startOf("forty", in: rates),
+                    candidate: startOf("forty", in: rates), matches: eq)?.end == endOf("six", in: rates))
+let digits = "We had 3 calls booked at 10 and 40% of them closed in 6 weeks, which made $2,500 in our first month."
+check("number words read for digits are not off script",
+      !offScript(digits, held: startOf("40%", in: digits), "booked at ten and forty percent of them")
+      && !offScript(digits, held: startOf("$2,500", in: digits), "which made two thousand five hundred dollars in our"))
+check("joinSpokenForms joins a number said in words into the script number",
+      SR.joinSpokenForms(said("made two thousand five hundred dollars in"), script: said("made $2,500 in")) == said("made 2500 in"))
+check("numberMatch: digits that start with the word's value",
+      SR.numberMatch("forty", "40") && SR.numberMatch("3", "three") && SR.numberMatch("twenty", "2024")
+      && SR.numberMatch("twentyfour", "24") && SR.numberMatch("third", "3rd"))
+check("numberMatch: other numbers and words do not match",
+      !SR.numberMatch("ten", "12") && !SR.numberMatch("ten", "twelve") && !SR.numberMatch("ten", "then"))
+// Words read as written are not joined into a compound (r3: "every day" was
+// joined into "everyday", so support ended on the wrong word).
+check("joinSpokenForms keeps 'every day' when the script has it as 2 words",
+      SR.joinSpokenForms(said("we post every day because"), script: said("post every day because everyday content"))
+      == said("we post every day because"))
+let everyOne = "Thank you, every one of you, for being here."
+check("support: 'everyone' for 'every one' moves on to 'one'",
+      SR.supportEnd(source: everyOne, spoken: said("thank you everyone"), current: startOf("every", in: everyOne),
+                    candidate: startOf("every", in: everyOne), matches: eq)?.end == endOf("every one", in: everyOne))
 
 // Pick-up near the held place.
 let same = resume(launch, held: held, "sorry where was I we tried paid")

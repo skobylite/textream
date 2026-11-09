@@ -885,8 +885,11 @@ class SpeechRecognizer {
         let spokenWords = Self.regressionWords(in: spoken)
         let window = Self.offScriptWindow(source: sourceText, from: recognizedCharCount,
                                           to: max(candidate, recognizedCharCount))
+        let near = Self.nearScriptWords(source: sourceText, from: recognizedCharCount,
+                                        to: max(candidate, recognizedCharCount))
         if !(regressionFloor > 0 && recognizedCharCount == regressionFloor),
-           Self.offScriptMisses(spoken: spokenWords, window: window, matches: regressionMatch) > Self.offScriptMaxMisses {
+           Self.offScriptMisses(spoken: spokenWords, window: window, known: near,
+                                matches: regressionMatch) > Self.offScriptMaxMisses {
             isOffScript = true
             return
         }
@@ -897,7 +900,7 @@ class SpeechRecognizer {
         // goes no further than they do. When all of them match just ahead
         // and the matchers lag, follow them.
         guard let support = Self.supportEnd(source: sourceText, spoken: spokenWords, current: recognizedCharCount,
-                                            candidate: candidate, matches: supportMatch) else { return }
+                                            candidate: candidate, known: near, matches: supportMatch) else { return }
         var forward = candidate
         if support.matches >= Self.supportTailWords, support.end + 1 > candidate,
            support.end <= recognizedCharCount + Self.supportFarChars {
@@ -1005,17 +1008,141 @@ class SpeechRecognizer {
     }
 
     /// How many of the newest `offScriptCheckWords` spoken words are not part
-    /// of the longest in-order match with the script words in `window`. A
-    /// script word said as several words counts as one word.
-    static func offScriptMisses(spoken: [String], window: [String],
+    /// of the best in-order match with the script words in `window`. A
+    /// script word said as several words counts as one word, a number in
+    /// digits matches it in words (see `numberMatch`), and a name heard as
+    /// 2 or 3 other words counts as one miss (see `alignSpoken`).
+    static func offScriptMisses(spoken: [String], window: [String], known: Set<String> = [],
                                 matches: (String, String) -> Bool) -> Int {
+        func same(_ a: String, _ b: String) -> Bool { matches(a, b) || numberMatch(a, b) }
         let recent = Array(spoken.suffix(offScriptCheckWords * spokenFormMaxWords))
-        let newest = Array(joinSpokenForms(recent, script: window, partialEnd: true).suffix(offScriptCheckWords))
-        return newest.count - inOrderHits(newest, window, matches: matches)
+        let joined = joinSpokenForms(recent, script: window, partialEnd: true)
+        return alignSpoken(joined, window, known: known, countFrom: max(0, joined.count - offScriptCheckWords),
+                           matches: same).misses
+    }
+
+    // MARK: Words the recogniser writes in another form
+
+    /// Units said with a number ("forty percent", "ninety nine dollars").
+    static let numberUnits: Set<String> = ["percent", "dollars", "dollar", "pounds", "pound", "euros", "euro", "cents", "k", "grand"]
+    /// The values of number words: zero to nineteen, the tens, hundred to
+    /// billion, and the ordinals first to twelfth, twentieth and thirtieth.
+    static let numberValues: [String: Int] = {
+        let units = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+                     "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+        let ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+                        "eleventh", "twelfth"]
+        var v: [String: Int] = ["hundred": 100, "thousand": 1000, "million": 1_000_000, "billion": 1_000_000_000,
+                                "twentieth": 20, "thirtieth": 30]
+        for (k, w) in units.enumerated() { v[w] = k }
+        for (k, w) in numberTens.enumerated() { v[w] = 20 + 10 * k }
+        for (k, w) in ordinals.enumerated() { v[w] = k + 1 }
+        return v
+    }()
+    static let numberTens = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+    static func hasDigit(_ w: String) -> Bool { w.contains { $0.isNumber } }
+
+    /// The value of a number word: "forty" 40, "twentyfour" 24, "third" 3.
+    static func numberValue(_ w: String) -> Int? {
+        if let v = numberValues[w] { return v }
+        for tens in numberTens where w.hasPrefix(tens) {
+            if let u = numberValues[String(w.dropFirst(tens.count))], (1...9).contains(u) { return numberValues[tens]! + u }
+        }
+        return nil
+    }
+
+    /// A number word or a unit said with a number.
+    static func isNumberWord(_ w: String) -> Bool { numberUnits.contains(w) || numberValue(w) != nil }
+
+    /// A number word and a number in digits, either way round, when the
+    /// digits start with the word's value ("40" for "forty", "2024" for
+    /// "twenty", "3rd" for "third"), so "12" is not "ten".
+    static func numberMatch(_ script: String, _ spoken: String) -> Bool {
+        func fits(_ digits: String, _ word: String) -> Bool {
+            guard hasDigit(digits), let v = numberValue(word) else { return false }
+            return digits.filter { $0.isNumber }.hasPrefix(String(v))
+        }
+        return fits(spoken, script) || fits(script, spoken)
+    }
+
+    /// A script word of this many letters or more (a name or a brand) can be
+    /// heard as 2 or 3 other words ("Shopify" as "shop if I", "Kajabi" as
+    /// "car jabby"), when their letters are within `soundAlikeLetterSlack`
+    /// of its letters and none of them with `soundAlikeOwnLetters` letters
+    /// or more is itself a script word near the highlight: an ad-lib is made
+    /// of common words, and a reader who skips on says script words.
+    static let soundAlikeMinLetters = 5
+    static let soundAlikeLetterSlack = 3
+    static let soundAlikeOwnLetters = 3
+
+    /// The script words up to `resumeFarChars` chars before `from` and after `to`.
+    static func nearScriptWords(source: String, from: Int, to: Int) -> Set<String> {
+        Set(regressionSourceWords(source, from: max(0, from - resumeFarChars),
+                                  to: min(source.count, to + resumeFarChars)).map(\.word))
+    }
+
+    /// The best in-order alignment of `spoken` with `script`. A spoken word
+    /// is a hit, a miss, or one of 2 or 3 words that stand for one script
+    /// word (see `soundAlikeMinLetters`). Such a group comes after a hit and
+    /// before a hit; a group of 2 can also be the newest words (the hit after
+    /// it is not in yet). A group counts as one miss, at its first word.
+    /// Returns the misses at spoken words from `countFrom` on, and `spoken`
+    /// with each group that has a hit after it replaced by its script word.
+    static func alignSpoken(_ spoken: [String], _ script: [String], known: Set<String> = [], countFrom: Int,
+                            matches: (String, String) -> Bool) -> (misses: Int, words: [String]) {
+        let n = spoken.count, m = script.count
+        let none = Int.max / 2
+        let scriptSet = known.union(script)
+        let canGroup = spoken.map { $0.count < soundAlikeOwnLetters || !scriptSet.contains($0) }
+        // State f: 0 after a miss (or at the start), 1 after a hit, k = 2 or 3
+        // after a group of k words (a hit must follow; a group of 2 may end).
+        typealias Step = (i: Int, j: Int, f: Int)
+        var cost = [[[Int]]](repeating: [[Int]](repeating: [Int](repeating: none, count: 4), count: m + 1), count: n + 1)
+        var from = [[[Step?]]](repeating: [[Step?]](repeating: [Step?](repeating: nil, count: 4), count: m + 1), count: n + 1)
+        cost[0][0][0] = 0
+        func relax(_ i: Int, _ j: Int, _ f: Int, _ c: Int, _ p: Step) {
+            if c < cost[i][j][f] { cost[i][j][f] = c; from[i][j][f] = p }
+        }
+        for i in 0...n { for j in 0...m { for f in 0..<4 {
+            let c = cost[i][j][f]
+            guard c < none else { continue }
+            let p = (i: i, j: j, f: f)
+            if j < m { relax(i, j + 1, f, c, p) } // script word not said
+            guard i < n else { continue }
+            if j < m, matches(script[j], spoken[i]) { relax(i + 1, j + 1, 1, c, p) }
+            let miss = i >= countFrom ? 1 : 0
+            if f < 2 { relax(i + 1, j, 0, c + miss, p) }
+            if f == 1, j < m, script[j].count >= soundAlikeMinLetters {
+                for k in 2...3 where i + k <= n && canGroup[i..<(i + k)].allSatisfy({ $0 }) {
+                    let letters = spoken[i..<(i + k)].reduce(0) { $0 + $1.count }
+                    if abs(letters - script[j].count) <= soundAlikeLetterSlack { relax(i + k, j + 1, k, c + miss, p) }
+                }
+            }
+        } } }
+        var best: (j: Int, f: Int)?
+        for j in 0...m { for f in 0..<3 where cost[n][j][f] < none {
+            if best == nil || cost[n][j][f] < cost[n][best!.j][best!.f] { best = (j, f) }
+        } }
+        guard let best else { return (0, spoken) }
+        var out: [String] = []
+        var at = (i: n, j: best.j, f: best.f)
+        while let p = from[at.i][at.j][at.f] {
+            let k = at.i - p.i
+            if k >= 2 {
+                if at.i < n { out.append(script[p.j]) } else { out.append(contentsOf: spoken[p.i..<at.i].reversed()) }
+            } else if k == 1 {
+                out.append(spoken[p.i])
+            }
+            at = p
+        }
+        return (cost[n][best.j][best.f], out.reversed())
     }
 
     /// The most spoken words that can stand for one script word.
     static let spokenFormMaxWords = 3
+    /// Short forms that are read in full ("i.e." as "that is").
+    static let spokenExpansions: [String: Set<String>] = ["ie": ["that is"], "eg": ["for example", "for instance"], "etc": ["et cetera", "and so on"], "vs": ["versus"], "dr": ["doctor"], "mr": ["mister"], "mrs": ["missus", "misses"], "aka": ["also known as"], "diy": ["do it yourself"], "fyi": ["for your information"]]
     /// The ends of contractions (letters only) and the words they stand for.
     static let contractionEnds: [String: Set<String>] = ["m": ["am"], "s": ["is", "has", "us"], "ve": ["have"], "re": ["are"], "ll": ["will"], "d": ["would", "had"], "t": ["not"], "nt": ["not"]]
 
@@ -1024,6 +1151,10 @@ class SpeechRecognizer {
     /// "step-by-step"), or they are a contraction said in full ("i am" for
     /// "I'm", "do not" for "don't").
     static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
+        if spokenExpansions[script]?.contains(words.joined(separator: " ")) == true { return true }
+        if words.count == 3, words[words.startIndex + 1] == "and",
+           words.first! + words.last! == script { return true } // "q and a" for "Q&A"
+        guard words.count >= 2 else { return false }
         if words.joined() == script { return true }
         guard words.count == 2, let first = words.first, let last = words.last,
               first.count < script.count, script.hasPrefix(first) else { return false }
@@ -1039,9 +1170,19 @@ class SpeechRecognizer {
         var i = 0
         while i < spoken.count {
             var joined: (word: String, count: Int)?
-            for k in stride(from: spokenFormMaxWords, through: 2, by: -1) where i + k <= spoken.count {
+            // A number said in words ("two thousand five hundred dollars") for a
+            // script number in digits ("$2,500"): the whole run of number words.
+            if isNumberWord(spoken[i]), !numberUnits.contains(spoken[i]),
+               let w = script.first(where: { hasDigit($0) && numberMatch($0, spoken[i]) }) {
+                let run = spoken[i...].prefix(while: { isNumberWord($0) }).count
+                if run >= 2 { joined = (w, run) }
+            }
+            for k in stride(from: spokenFormMaxWords, through: 1, by: -1) where joined == nil && i + k <= spoken.count {
                 let group = spoken[i..<(i + k)]
-                let atEnd = partialEnd && i + k == spoken.count
+                // Words read as written ("every day" in a script that also has
+                // "everyday") stay as they are.
+                if k >= 2, hasRun(script, group) { continue }
+                let atEnd = partialEnd && k >= 2 && i + k == spoken.count
                 if let w = script.first(where: { isSpokenForm($0, group)
                     || (atEnd && $0.count > group.joined().count && $0.hasPrefix(group.joined())) }) {
                     joined = (w, k)
@@ -1052,6 +1193,12 @@ class SpeechRecognizer {
             i += joined?.count ?? 1
         }
         return out
+    }
+
+    /// True when `words` are in `script` as words in a row.
+    static func hasRun(_ script: [String], _ words: ArraySlice<String>) -> Bool {
+        guard !words.isEmpty, words.count <= script.count else { return false }
+        return (0...(script.count - words.count)).contains { script[$0..<($0 + words.count)].elementsEqual(words) }
     }
 
     /// Script words for the off-script check: `offScriptBackWords` words
@@ -1167,12 +1314,15 @@ class SpeechRecognizer {
     /// they continue it near the highlight, and how many of them matched.
     /// Nil when they do not: no forward move. Support that ends after
     /// `current` is preferred; support behind it still means on script.
-    static func supportEnd(source: String, spoken: [String], current: Int, candidate: Int,
+    static func supportEnd(source: String, spoken: [String], current: Int, candidate: Int, known: Set<String> = [],
                            matches: (String, String) -> Bool) -> (end: Int, matches: Int)? {
         let words = regressionSourceWords(source, from: max(0, current - supportBackChars),
                                           to: max(candidate, current) + supportAheadChars)
+        func same(_ a: String, _ b: String) -> Bool { matches(a, b) || numberMatch(a, b) }
         let recent = Array(spoken.suffix(supportTailWords * spokenFormMaxWords))
-        let tail = Array(joinSpokenForms(recent, script: words.map(\.word)).suffix(supportTailWords))
+        let joined = joinSpokenForms(recent, script: words.map(\.word))
+        let tail = Array(alignSpoken(joined, words.map(\.word), known: known, countFrom: 0,
+                                     matches: same).words.suffix(supportTailWords))
         guard !tail.isEmpty else { return nil }
         let minMatches = min(supportMinMatches, tail.count)
         var behind: (end: Int, matches: Int)?
@@ -1180,14 +1330,17 @@ class SpeechRecognizer {
         for e in words.indices {
             // The newest word may be a misheard script word: try the one before it too.
             for newest in stride(from: tail.count - 1, through: max(0, tail.count - 2), by: -1) {
-                guard matches(words[e].word, tail[newest]) else { continue }
+                // One spoken word for 2 script words ("everyone" for "every one",
+                // "cannot" for "can not") matches the first and ends on the second.
+                let pair = e + 1 < words.count && tail[newest] == words[e].word + words[e + 1].word
+                guard pair || same(words[e].word, tail[newest]) else { continue }
                 var hits = 1
                 var si = e
                 var ti = newest - 1
                 while ti >= 0 && si > 0 {
                     var hit: Int?
                     for back in 1...(1 + supportGap) where si - back >= 0 {
-                        if matches(words[si - back].word, tail[ti]) { hit = si - back; break }
+                        if same(words[si - back].word, tail[ti]) { hit = si - back; break }
                     }
                     if let hit { si = hit; hits += 1 }
                     ti -= 1
@@ -1195,7 +1348,7 @@ class SpeechRecognizer {
                 guard hits >= minMatches else { continue }
                 if words[e].start > current + supportFarChars, hits < supportTailWords { continue }
                 // When the newest word did not match, allow the next script word too.
-                let f = (newest < tail.count - 1 && e + 1 < words.count) ? e + 1 : e
+                let f = (e + 1 < words.count && (newest < tail.count - 1 || pair)) ? e + 1 : e
                 let end = words[f].start + words[f].length
                 if end > current {
                     if ahead == nil || hits > ahead!.matches { ahead = (end, hits) }
