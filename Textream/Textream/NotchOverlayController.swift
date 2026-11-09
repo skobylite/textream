@@ -969,6 +969,10 @@ struct NotchOverlayView: View {
                     .frame(height: compactControlFadeHeight)
                 }
             }
+            .overlay(alignment: .bottom) {
+                ReadingProgressBar(charCount: effectiveCharCount, totalCharCount: totalCharCount)
+                    .padding(.horizontal, 12)
+            }
             .transition(.move(edge: .top).combined(with: .opacity))
 
             Group {
@@ -1452,6 +1456,10 @@ struct FloatingOverlayView: View {
             .id(content.currentPageIndex)
             .padding(.horizontal, 16)
             .padding(.top, 12)
+            .overlay(alignment: .bottom) {
+                ReadingProgressBar(charCount: effectiveCharCount, totalCharCount: totalCharCount)
+                    .padding(.horizontal, 16)
+            }
 
             HStack(alignment: .center, spacing: 8) {
                 AudioWaveformProgressView(

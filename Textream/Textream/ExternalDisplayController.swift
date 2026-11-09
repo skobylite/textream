@@ -269,6 +269,10 @@ struct ExternalDisplayView: View {
             )
             .id(content.currentPageIndex)
             .padding(.horizontal, hPad)
+            .overlay(alignment: .bottom) {
+                ReadingProgressBar(charCount: effectiveCharCount, totalCharCount: totalCharCount, height: 4)
+                    .padding(.horizontal, hPad)
+            }
 
                 Spacer().frame(height: 20)
 

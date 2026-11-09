@@ -2017,6 +2017,33 @@ struct ElapsedTimeView: View {
     }
 }
 
+// MARK: - Reading Progress Bar
+
+/// A thin bar under the prompter text: how far the reader is through the page.
+struct ReadingProgressBar: View {
+    let charCount: Int
+    let totalCharCount: Int
+    var height: CGFloat = 3
+
+    private var progress: Double {
+        totalCharCount > 0 ? min(1, max(0, Double(charCount) / Double(totalCharCount))) : 0
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.12))
+                Capsule()
+                    .fill(NotchSettings.shared.fontColorPreset.color.opacity(0.7))
+                    .frame(width: geo.size.width * progress)
+            }
+        }
+        .frame(height: height)
+        .animation(.linear(duration: 0.3), value: progress)
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Audio Waveform + Progress
 
 struct AudioWaveformProgressView: View {

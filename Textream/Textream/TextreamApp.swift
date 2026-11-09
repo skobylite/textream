@@ -141,6 +141,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     window.makeKeyAndOrderFront(nil)
                 }
                 NSApp.activate(ignoringOtherApps: true)
+            } else if url.isFileURL {
+                // Open in Textream (Finder, Alfred, open -a): a script file.
+                TextreamService.shared.openScriptFile(url)
+                for window in NSApp.windows where !(window is NSPanel) {
+                    window.makeKeyAndOrderFront(nil)
+                }
+                NSApp.activate(ignoringOtherApps: true)
             } else {
                 let wasExternal = TextreamService.shared.launchedExternally
                 TextreamService.shared.launchedExternally = true

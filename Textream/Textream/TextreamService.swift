@@ -524,6 +524,53 @@ class TextreamService: NSObject, ObservableObject {
         }
     }
 
+    /// Opens a file that was sent to Textream from Finder, Alfred or
+    /// `open -a`. A .pptx is imported. A note of the vault opens linked to
+    /// its note, as from the Scripts list. Any other text file opens on a
+    /// page: the current page when it is blank, else a new page.
+    func openScriptFile(_ url: URL) {
+        let ext = url.pathExtension.lowercased()
+        if ext == "pptx" {
+            importPresentation(from: url)
+            return
+        }
+        // The draft must be back first, or it replaces the new page later.
+        restoreDraft()
+        let path = url.resolvingSymlinksInPath().path
+        let queue = ScriptQueue.shared
+        if ext == "md", directorSnapshot == nil,
+           let item = queue.items.first(where: { $0.url.resolvingSymlinksInPath().path == path }) {
+            queue.load(item)
+            return
+        }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            let alert = NSAlert()
+            alert.messageText = "Textream can't open “\(url.lastPathComponent)”"
+            alert.informativeText = "Textream opens text files (.txt, .md), .pptx files and .textream files."
+            alert.runModal()
+            return
+        }
+        let body = (ext == "md" ? ScriptQueue.stripFrontmatter(text) : text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        if var held = directorSnapshot {
+            // A Director session shows its own text. The file waits in the
+            // held pages, which come back when the session ends.
+            held.pages.append(body)
+            held.index = held.pages.count - 1
+            directorSnapshot = held
+            scheduleDraftSave()
+            return
+        }
+        if currentPageIndex < pages.count,
+           pages[currentPageIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pages[currentPageIndex] = body
+        } else {
+            pages.append(body)
+            currentPageIndex = pages.count - 1
+        }
+    }
+
     // MARK: - Browser Server
 
     func updateBrowserServer() {
