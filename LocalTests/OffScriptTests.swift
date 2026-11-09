@@ -1,4 +1,4 @@
-// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions scaleLetters hasRun
+// extract: Textream/Textream/SpeechRecognizer.swift SpeechRecognizer offScriptCheckWords offScriptMaxMisses offScriptBackWords offScriptAheadWords resumeRunWords resumeBackWords resumeNearWords resumeSlipHits resumeFarRunWords resumeFarChars resumeExactBelowLetters supportTailWords supportMinMatches supportBackChars supportAheadChars supportGap supportFarChars offScriptMisses offScriptWindow inOrderHits spokenFormMaxWords contractionEnds isSpokenForm joinSpokenForms inOrderLast dropLastWords offScriptResume supportEnd regressionSourceWords numberUnits numberValues numberTens hasDigit numberValue numberStart isNumberWord numberMatch rangeDigits soundAlikeMinLetters soundAlikeLetterSlack soundAlikeOwnLetters nearScriptWords alignSpoken spokenExpansions scaleLetters hasRun spokenNumberForms
 // include: Textream/Textream/SpeechTextAlignment.swift
 // Tests for the off-script (ad-lib) hold: the static check, pick-up and
 // support functions of SpeechRecognizer. The end-to-end check is the speech
@@ -348,6 +348,37 @@ check("an ad-lib with 'a hundred' in it is still off script",
       offScript(coach, held: startOf("$1M", in: coach), "a hundred people came to the last one"))
 check("an ad-lib with another range is still off script",
       offScript(coach, held: startOf("$3-5k", in: coach), "we did 3 to 5 calls a day back then"))
+
+// A number said in words joins the script number with its value (r4 round 1:
+// "two thousand five hundred" took the "k" of "thousand" and joined "$20k").
+let plan = "Go from $2,500 to $20k a month with the 3 step plan, and do it in less than 6 months."
+check("spokenNumberForms: value first, then the short form ('twenty k', 'four grand', 'two and a half million')",
+      SR.spokenNumberForms(said("two thousand five hundred dollars")[...]) == ["2500"]
+      && SR.spokenNumberForms(said("twenty K")[...]) == ["20000", "20k", "20"]
+      && SR.spokenNumberForms(said("four grand")[...]) == ["4000", "4k", "4"]
+      && SR.spokenNumberForms(said("two and a half million")[...]) == ["2500000", "25m", "25"])
+check("'two thousand five hundred to twenty K' joins '2500' then '20k'",
+      SR.joinSpokenForms(said("go from two thousand five hundred to twenty K"), script: said(plan))
+        == said("go from 2500 to 20k"))
+check("'four grand' for '$4,000' joins '4000', not '$40k'",
+      SR.joinSpokenForms(said("charge four grand"), script: said("Charge $4,000 for the first program, and $40k is"))
+        == ["charge", "4000"])
+check("'two thousand five hundred to' with one misheard word is not off script",
+      !offScript(plan, held: startOf("$2,500", in: plan), "so from two thousand five hundred to"))
+// Script text with "a hundred" / "a million" read as written (r4 round 1: it
+// joined a nearby "12" or "100" and the highlight waited).
+check("numbers read as written in the script stay as they are ('a hundred', 'two thousand')",
+      SR.joinSpokenForms(said("we had a hundred leads"), script: said("We had a hundred leads and 12 calls"))
+        == said("we had a hundred leads")
+      && SR.joinSpokenForms(said("we sold two thousand copies"), script: said("We sold two thousand copies in 2 weeks"))
+        == said("we sold two thousand copies"))
+let reach = "We reached a million views and 100 new leads in 12 days with one simple reel."
+check("'a million' read as written with one misheard word is not off script",
+      !offScript(reach, held: startOf("views", in: reach), "we reached a million use and 100"))
+check("'two and a half years' does not join '2x' (another value; the window has lost 'two')",
+      SR.joinSpokenForms(said("two and a half years"), script: said("and a half years to reach 2x")) == said("two and a half years"))
+check("'a hundred' in an ad-lib does not join '12' (another value)",
+      SR.joinSpokenForms(said("a hundred people applied"), script: said("to land 12 new clients")) == said("a hundred people applied"))
 
 // Helpers.
 check("inOrderHits counts the longest in-order match", SR.inOrderHits(said("a x b c"), said("a b c d"), matches: eq) == 3)

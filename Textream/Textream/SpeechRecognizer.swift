@@ -1061,6 +1061,32 @@ class SpeechRecognizer {
         return String(v)
     }
 
+    /// The script forms of a number said in words, the closest first: its
+    /// value in digits and, when it ends with a scale word, the number before
+    /// that word with and without the scale letter. "two thousand five
+    /// hundred" is "2500"; "twenty k" is "20000", "20k" or "20"; "two and a
+    /// half million" is "2500000", "25m" ("$2.5M") or "25" ("2.5 million").
+    /// Unit words ("dollars") do not count.
+    static func spokenNumberForms(_ words: ArraySlice<String>) -> [String] {
+        func digits(_ x: Double) -> String { x == x.rounded() ? String(Int(x)) : String(x).filter(\.isNumber) }
+        var total = 0.0, part = 0.0, short: (said: String, letter: String)?
+        for (n, w) in words.enumerated() {
+            if let letter = scaleLetters[w] ?? (w == "k" ? "k" : nil), letter != "x" {
+                short = total == 0 ? (digits(max(part, 1)), letter) : nil
+                total += max(part, 1) * Double(numberValues[w] ?? 1000)
+                part = 0
+            } else if w == "and" || (w == "a" && n > 0) || numberUnits.contains(w) {
+                continue
+            } else {
+                short = nil
+                if w == "a" { part = 1 } else if w == "half" { part += 0.5 } else if w == "hundred" {
+                    part = max(part, 1) * 100
+                } else if let v = numberValue(w) { part += Double(v) } else { return [] }
+            }
+        }
+        return [digits(total + part)] + (short.map { [$0.said + $0.letter, $0.said] } ?? [])
+    }
+
     /// A number word or a unit said with a number.
     static func isNumberWord(_ w: String) -> Bool { numberUnits.contains(w) || numberValue(w) != nil }
 
@@ -1233,13 +1259,15 @@ class SpeechRecognizer {
                     run += half ? 3 : and ? 2 : 1
                 }
                 // Of several script numbers that start with these digits, the one
-                // with the scale letter said wins ("one million" is "1m", not "10k").
-                // "a" only stands for that one or a plain number ("a hundred" is
-                // "100", not "1m").
-                let unit = spoken[i..<(i + run)].compactMap { scaleLetters[$0] }.last ?? ""
-                let w = fits.first { $0.drop(while: \.isNumber) == unit }
-                    ?? (one ? fits.first { $0.allSatisfy(\.isNumber) } : fits[0])
-                if run >= 2, let w { joined = (w, run) }
+                // with the value said wins ("one million" is "1m", not "10k"; "two
+                // thousand five hundred" is "2500", not "20k"; "two and a half" the
+                // start of "25m"), else a plain number, else the first. A run with
+                // "a" or "half" joins only its value ("a hundred" is "100", not "12").
+                // Words read as written ("a hundred" in the script) stay as they are.
+                let words = spoken[i..<(i + run)], forms = spokenNumberForms(words)
+                let w = forms.lazy.compactMap { f in fits.first { $0 == f || $0.filter(\.isNumber) == f } }.first
+                    ?? (one || words.contains("half") ? nil : fits.first { $0.allSatisfy(\.isNumber) } ?? fits[0])
+                if run >= 2, let w, !hasRun(script, words) { joined = (w, run) }
             }
             // A range with a unit word ("4 to 6 pm" for "4-6pm", "3 to 5 grand" for "$3-5k").
             if joined == nil, i + 4 <= spoken.count, let r = rangeDigits(spoken[i..<(i + 4)]), script.contains(r) {
