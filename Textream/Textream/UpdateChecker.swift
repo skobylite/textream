@@ -78,6 +78,19 @@ class UpdateChecker {
     private func showUpdateAvailable(latestVersion: String, releaseURL: String) {
         let alert = NSAlert()
         alert.messageText = "Update Available"
+        #if LOCAL_BUILD
+        // Local build (build-local.sh): upstream's app would replace this build.
+        alert.informativeText = "Upstream Textream \(latestVersion) is available. This build uses Textream \(currentVersion). To update this build, run update.sh. Do not install the upstream app. It replaces this build."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Release Notes")
+
+        if alert.runModal() == .alertSecondButtonReturn {
+            if let url = URL(string: releaseURL) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        #else
         alert.informativeText = "Textream \(latestVersion) is available. You are currently running \(currentVersion)."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Download")
@@ -88,6 +101,7 @@ class UpdateChecker {
                 NSWorkspace.shared.open(url)
             }
         }
+        #endif
     }
 
     private func showUpToDate() {

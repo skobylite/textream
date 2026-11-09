@@ -177,8 +177,24 @@ class TextreamService: NSObject, ObservableObject {
         }
     }
 
-    @Published var currentFileURL: URL?
+    @Published var currentFileURL: URL? {
+        didSet {
+            // The sandbox lets the next launch open this file again only
+            // through a security-scoped bookmark, made while access is granted.
+            currentFileBookmark = try? currentFileURL?.bookmarkData(
+                options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            if let scoped = scopedFileURL, scoped != currentFileURL {
+                scoped.stopAccessingSecurityScopedResource()
+                scopedFileURL = nil
+            }
+        }
+    }
     @Published var savedPages: [String] = [""]
+    /// Bookmark of currentFileURL, saved with the draft.
+    private var currentFileBookmark: Data?
+    /// The draft's file, opened from its bookmark at launch. Its access stays
+    /// on while it is the current file, so Save can write to it.
+    private var scopedFileURL: URL?
 
     // MARK: - Draft Autosave
 
@@ -189,10 +205,13 @@ class TextreamService: NSObject, ObservableObject {
         static let pages = "draftPages"
         static let pageIndex = "draftPageIndex"
         static let fileURL = "draftFileURL"
+        static let fileBookmark = "draftFileBookmark"
     }
 
     private var draftSaveWork: DispatchWorkItem?
-    private var draftRestored = false
+    /// The first restoreDraft result. Nil until the draft is restored.
+    private var draftRestoreResult: Bool?
+    private var draftRestored: Bool { draftRestoreResult != nil }
 
     private func scheduleDraftSave() {
         guard draftRestored else { return }
@@ -204,57 +223,88 @@ class TextreamService: NSObject, ObservableObject {
 
     /// Writes immediately. Called on quit and on hide, where a debounce would lose the tail.
     func saveDraft() {
+        // Before the restore, `pages` is not the draft: never write it over the saved one.
+        guard draftRestored else { return }
         draftSaveWork?.cancel()
         let defaults = UserDefaults.standard
-        defaults.set(pages, forKey: DraftKey.pages)
-        defaults.set(currentPageIndex, forKey: DraftKey.pageIndex)
+        // While Director text fills the pages, the draft keeps the pages from before.
+        let draft = directorSnapshot ?? (pages: pages, index: currentPageIndex)
+        defaults.set(draft.pages, forKey: DraftKey.pages)
+        defaults.set(draft.index, forKey: DraftKey.pageIndex)
         defaults.set(currentFileURL?.path, forKey: DraftKey.fileURL)
+        defaults.set(currentFileBookmark, forKey: DraftKey.fileBookmark)
         ScriptQueue.shared.scheduleSync()
     }
 
-    /// Returns true when a draft was restored, so the caller does not seed the
-    /// sample script over the top of it.
+    /// Puts back the saved pages (see draftState). Returns false only when no
+    /// draft was ever saved (a first launch), so the caller can show the
+    /// sample script. Runs once: a later call returns the first result.
     @discardableResult
     func restoreDraft() -> Bool {
-        defer { draftRestored = true }
+        if let restored = draftRestoreResult { return restored }
         let defaults = UserDefaults.standard
-        guard let stored = defaults.stringArray(forKey: DraftKey.pages),
-              !stored.isEmpty,
-              stored.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-        else { return false }
-
-        pages = stored
-        currentPageIndex = min(max(0, defaults.integer(forKey: DraftKey.pageIndex)), stored.count - 1)
-
-        // Drop exact-duplicate and empty pages accumulated by earlier builds.
-        var seen = Set<String>()
-        var cleaned: [String] = []
-        for page in pages {
-            let trimmed = page.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || seen.contains(page) { continue }
-            seen.insert(page)
-            cleaned.append(page)
+        guard let draft = Self.draftState(stored: defaults.stringArray(forKey: DraftKey.pages),
+                                          index: defaults.integer(forKey: DraftKey.pageIndex),
+                                          keepBlankPages: defaults.string(forKey: DraftKey.fileURL) != nil)
+        else {
+            draftRestoreResult = false
+            return false
         }
-        if cleaned.isEmpty { cleaned = [""] }
-        if cleaned != pages {
-            pages = cleaned
-            currentPageIndex = min(currentPageIndex, pages.count - 1)
-        }
+
+        pages = draft.pages
+        currentPageIndex = draft.index
 
         ScriptQueue.shared.restoreOrigins()
 
         // Reattach to the file it came from, so Save still targets it and the
         // unsaved-changes dot stays accurate.
-        if let path = defaults.string(forKey: DraftKey.fileURL) {
-            let url = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: path),
-               let data = try? Data(contentsOf: url),
-               let onDisk = try? JSONDecoder().decode([String].self, from: data) {
-                currentFileURL = url
-                savedPages = onDisk
-            }
+        if let url = reopenDraftFile(defaults),
+           let data = try? Data(contentsOf: url),
+           let onDisk = try? JSONDecoder().decode([String].self, from: data), !onDisk.isEmpty {
+            currentFileURL = url
+            savedPages = onDisk
+        } else if let scoped = scopedFileURL {
+            scoped.stopAccessingSecurityScopedResource()
+            scopedFileURL = nil
         }
+        draftRestoreResult = true
         return true
+    }
+
+    /// The saved draft without its blank pages. Copies stay, and one page
+    /// always stays. A draft of a file keeps its blank pages: they can be
+    /// pages of the file, and without them the file shows as changed. The
+    /// same page stays selected; when it was blank, the nearest page before
+    /// it (or the first page). Nil when no draft was ever saved.
+    static func draftState(stored: [String]?, index: Int, keepBlankPages: Bool) -> (pages: [String], index: Int)? {
+        guard let stored else { return nil }
+        let selected = min(max(0, index), stored.count - 1)
+        var pages: [String] = []
+        var newIndex = 0
+        for (i, page) in stored.enumerated() {
+            if keepBlankPages || !page.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                pages.append(page)
+            }
+            if i == selected { newIndex = max(0, pages.count - 1) }
+        }
+        return pages.isEmpty ? ([""], 0) : (pages, newIndex)
+    }
+
+    /// The file the draft came from. In the sandbox only its bookmark can open
+    /// it again. That access starts here and stays on while it is the current
+    /// file (see currentFileURL). A file on a disk that is not connected is
+    /// skipped: launch never waits for a disk or shows a dialog.
+    private func reopenDraftFile(_ defaults: UserDefaults) -> URL? {
+        var stale = false   // a stale bookmark is made again when currentFileURL is set
+        if let bookmark = defaults.data(forKey: DraftKey.fileBookmark),
+           let url = try? URL(resolvingBookmarkData: bookmark,
+                              options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                              relativeTo: nil, bookmarkDataIsStale: &stale),
+           url.startAccessingSecurityScopedResource() {
+            scopedFileURL = url
+            return url
+        }
+        return defaults.string(forKey: DraftKey.fileURL).map { URL(fileURLWithPath: $0) }
     }
 
     // MARK: - File Operations
@@ -304,10 +354,11 @@ class TextreamService: NSObject, ObservableObject {
 
     private func saveToURL(_ url: URL) {
         do {
-            let data = try JSONEncoder().encode(pages)
+            let toSave = userPages   // not the text of a running Director session
+            let data = try JSONEncoder().encode(toSave)
             try data.write(to: url, options: .atomic)
             currentFileURL = url
-            savedPages = pages
+            savedPages = toSave
             rememberDocumentURL(url)
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
         } catch {
@@ -319,7 +370,32 @@ class TextreamService: NSObject, ObservableObject {
     }
 
     var hasUnsavedChanges: Bool {
-        pages != savedPages
+        userPages != savedPages
+    }
+
+    /// The user's pages. During a Director session its text fills `pages`
+    /// and the user's pages are held until the session ends. Save writes
+    /// these pages and the unsaved-changes check compares them.
+    static func userPages(_ pages: [String], held: [String]?) -> [String] {
+        held ?? pages
+    }
+
+    var userPages: [String] { Self.userPages(pages, held: directorSnapshot?.pages) }
+
+    /// Shows pages from a file or presentation. During a Director session they
+    /// become the held pages: the session keeps its text, and the loaded pages
+    /// show when it ends.
+    private func showLoadedPages(_ loaded: [String]) {
+        ScriptQueue.shared.resetSlot()
+        if directorSnapshot != nil {
+            directorSnapshot = (loaded, 0)
+            scheduleDraftSave()
+        } else {
+            pages = loaded
+            currentPageIndex = 0
+        }
+        savedPages = loaded
+        readPages.removeAll()
     }
 
     func openFile() {
@@ -358,11 +434,7 @@ class TextreamService: NSObject, ObservableObject {
             do {
                 let notes = try PresentationNotesExtractor.extractNotes(from: url)
                 DispatchQueue.main.async {
-                    ScriptQueue.shared.resetSlot()
-                    self?.pages = notes
-                    self?.savedPages = notes
-                    self?.currentPageIndex = 0
-                    self?.readPages.removeAll()
+                    self?.showLoadedPages(notes)
                     self?.currentFileURL = nil
                     self?.rememberDocumentURL(url)
                 }
@@ -402,16 +474,43 @@ class TextreamService: NSObject, ObservableObject {
         }
     }
 
+    /// Closing the main window quits Textream. The draft autosave keeps the
+    /// pages, as it does for Cmd-Q, so only an open file with unsaved changes
+    /// asks. Returns false when the user cancels or the save fails.
+    func confirmCloseIfNeeded() -> Bool {
+        restorePagesAfterDirector()   // compare and save the pages from before Director
+        guard let url = currentFileURL, hasUnsavedChanges else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "Save changes to “\(url.deletingPathExtension().lastPathComponent)”?"
+        alert.informativeText = "If you do not save, your changes to this file are lost."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            saveFile()
+            return !hasUnsavedChanges     // the save failed: keep the window open
+        case .alertSecondButtonReturn:
+            // Unlink the vault page without saving it, so the file's older
+            // text never reaches the note.
+            ScriptQueue.shared.dropSlot()
+            pages = savedPages
+            currentPageIndex = min(currentPageIndex, pages.count - 1)
+            return true
+        default:
+            return false
+        }
+    }
+
     func openFileAtURL(_ url: URL) {
         do {
             let data = try Data(contentsOf: url)
             let loadedPages = try JSONDecoder().decode([String].self, from: data)
             guard !loadedPages.isEmpty else { return }
-            ScriptQueue.shared.resetSlot()
-            pages = loadedPages
-            savedPages = loadedPages
-            currentPageIndex = 0
-            readPages.removeAll()
+            showLoadedPages(loadedPages)
             currentFileURL = url
             rememberDocumentURL(url)
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
@@ -449,7 +548,28 @@ class TextreamService: NSObject, ObservableObject {
                 overlayController.dismiss()
                 directorIsReading = false
             }
+            restorePagesAfterDirector()   // the editor shows again
         }
+    }
+
+    /// The pages and the selected page from before a Director session. The
+    /// draft keeps them, and they come back when the session ends.
+    private var directorSnapshot: (pages: [String], index: Int)?
+
+    /// Call before Director text replaces the pages. Before the draft is
+    /// restored the pages are not the user's, so there is nothing to hold.
+    private func holdPagesForDirector() {
+        if directorSnapshot == nil, draftRestored {
+            directorSnapshot = (pages, currentPageIndex)
+        }
+    }
+
+    private func restorePagesAfterDirector() {
+        guard let snapshot = directorSnapshot else { return }
+        directorSnapshot = nil
+        ScriptQueue.shared.resetSlot()
+        pages = snapshot.pages
+        currentPageIndex = min(snapshot.index, pages.count - 1)
     }
 
     private func wireDirectorCallbacks() {
@@ -470,6 +590,7 @@ class TextreamService: NSObject, ObservableObject {
 
         // Director mode is single page
         ScriptQueue.shared.resetSlot()
+        holdPagesForDirector()
         pages = [trimmed]
         currentPageIndex = 0
         readPages.removeAll()
@@ -487,6 +608,7 @@ class TextreamService: NSObject, ObservableObject {
             self?.browserServer.hideContent()
             // Restore listening mode
             NotchSettings.shared.listeningMode = savedMode
+            self?.restorePagesAfterDirector()
         }
 
         // Feed director server with speech recognizer
@@ -523,6 +645,7 @@ class TextreamService: NSObject, ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         ScriptQueue.shared.resetSlot()
+        holdPagesForDirector()
         pages = [trimmed]
 
         let words = splitTextIntoWords(trimmed)

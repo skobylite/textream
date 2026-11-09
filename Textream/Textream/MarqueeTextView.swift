@@ -11,6 +11,10 @@ private let paragraphDividerExtraSpacing: CGFloat = 14
 private let paragraphDividerDotSize: CGFloat = 3
 private let paragraphDividerDotSpacing: CGFloat = 5
 private let paragraphDividerDotOpacity: Double = 0.16
+/// WordFlowLayout renders only the lines within this distance of the viewport.
+private let wordFlowCullingBuffer: CGFloat = 400
+/// A live scroll shorter than this is a nudge, not a peek: the next word ends it.
+private let minimumPeekOffset: CGFloat = 8
 
 // MARK: - CJK-aware word splitting
 
@@ -150,6 +154,11 @@ struct SpeechScrollView: View {
     @State private var hasAppliedTrackingTarget = false
     @State private var anchoredLayoutWidth: CGFloat = 0
     @State private var anchoredParagraphBreakBeforeWordIndices: Set<Int> = []
+    /// The width of the view. trackingWordY lays out the lines with this
+    /// width. It is 0 until the view appears.
+    @State private var layoutWidth: CGFloat = 0
+    /// The highlight that word tracking last followed.
+    @State private var trackedCharCount = 0
     @State private var isAnimatingReadingPositionChange = false
     @State private var readingPositionAnimationGeneration = 0
 
@@ -187,6 +196,9 @@ struct SpeechScrollView: View {
                     if charOffset < highlightedCharCount {
                         allowsNextBackwardTrackingUpdate = true
                     }
+                    // The tap moves the view below, so the highlight change
+                    // that follows is not a move back to follow again.
+                    trackedCharCount = charOffset
                     onWordTap?(charOffset)
                     // Reposition from the tapped word itself instead of waiting
                     // for the parent progress update. That update can arrive
@@ -205,13 +217,21 @@ struct SpeechScrollView: View {
                 if widthChanged || paragraphLayoutChanged {
                     hasAppliedTrackingTarget = false
                 }
+                // This runs before onChange(of: geo.size.width). Give the line
+                // layout the new width now, so tracking below uses it. A new
+                // view keeps layoutWidth 0 until it appears.
+                if layoutWidth > 0, layoutWidth != geo.size.width {
+                    layoutWidth = geo.size.width
+                }
                 captureStableLineMetrics(from: positions)
                 wordYPositions = positions
                 // Re-anchor after a page switch or any live layout reflow. Keep
                 // the stable vertical metrics during width changes: the visible
                 // preference values may be culled from the middle of the text.
+                // A large width change can cull every line (empty positions);
+                // the line layout still gives the reader's line then.
                 if (wasEmpty || widthChanged || paragraphLayoutChanged),
-                   !positions.isEmpty {
+                   !positions.isEmpty || layoutWidth > 0 {
                     anchoredLayoutWidth = geo.size.width
                     anchoredParagraphBreakBeforeWordIndices = paragraphBreakBeforeWordIndices
                     recalculateTracking(containerHeight: containerHeight)
@@ -220,6 +240,9 @@ struct SpeechScrollView: View {
             .offset(y: scrollOffset + manualOffset)
             .animation(scrollOffsetAnimation, value: scrollOffset)
             .animation(.easeOut(duration: 0.15), value: manualOffset)
+            .onChange(of: geo.size.width, initial: true) { _, newWidth in
+                layoutWidth = newWidth
+            }
             .onChange(of: geo.size.height) { _, newHeight in
                 containerHeight = newHeight
                 hasAppliedTrackingTarget = false
@@ -231,8 +254,19 @@ struct SpeechScrollView: View {
             }
             .onChange(of: highlightedCharCount) { _, _ in
                 if isListening && !smoothScroll {
-                    manualOffset = 0
+                    // Reading progress does not end a live peek (its timer or a
+                    // tap does). The tracking base follows the reader and the
+                    // peek offset takes up the same distance, so the text
+                    // stays still. The next word ends a nudge.
+                    let isPeeking = abs(manualOffset) >= minimumPeekOffset
+                    if !isPeeking {
+                        manualOffset = 0
+                    }
+                    let baseBefore = scrollOffset
                     recalculateTracking(containerHeight: containerHeight)
+                    if isPeeking {
+                        manualOffset -= scrollOffset - baseBefore
+                    }
                 }
             }
             .onChange(of: smoothWordProgress) { _, _ in
@@ -242,6 +276,9 @@ struct SpeechScrollView: View {
                 }
             }
             .onChange(of: isListening) { _, listening in
+                // Pause and resume cancel a pending peek glide back. A paused
+                // view stays where the user scrolled it.
+                peekResetGeneration += 1
                 if listening {
                     manualOffset = 0
                     recalculateTracking(containerHeight: containerHeight)
@@ -291,15 +328,38 @@ struct SpeechScrollView: View {
             }
             .onAppear {
                 containerHeight = geo.size.height
+                // A live view made mid-script (for example when the page
+                // picker closes) shows the highlighted line, not the top. The
+                // first preference change ran before this with no height, so
+                // track again here. Write scrollOffset only once: a second
+                // write in this update leaves the word positions stale.
+                if highlightedCharCount > 0, !smoothScroll,
+                   readingPositionTransitionDuration == nil {
+                    layoutWidth = geo.size.width
+                    hasAppliedTrackingTarget = false
+                    recalculateTracking(containerHeight: containerHeight)
+                    if hasAppliedTrackingTarget { return }
+                }
                 scrollOffset = initialScrollOffset(containerHeight: containerHeight)
             }
             .overlay(
                 ScrollWheelView(
                     onScroll: { delta in
-                        // Word tracking while live: scrolling is a peek — it
-                        // must not fight the tracker, so it eases back on end.
+                        // Word tracking scrolls live and paused. While live, a
+                        // scroll is a peek: it does not fight the tracker, and
+                        // it glides back 6 s after the last scroll.
                         let canScroll = smoothScroll ? isListening : true
                         guard canScroll else { return }
+
+                        if !smoothScroll {
+                            // Every scroll event cancels the earlier timer, so it
+                            // cannot fire during or after this scroll. A mouse
+                            // wheel sends no end phase, so the timer starts here.
+                            peekResetGeneration += 1
+                            if isListening {
+                                schedulePeekGlideBack()
+                            }
+                        }
 
                         // Pause timer when user starts scrolling in smooth mode
                         if smoothScroll && !isUserScrolling {
@@ -307,25 +367,15 @@ struct SpeechScrollView: View {
                             onManualScroll?(true, 0)
                         }
 
-                        let maxY = wordYPositions.values.max() ?? 0
-                        let containerHeight = geo.size.height
-
-                        // Absolute bounds: the peek can reach the very top and
-                        // bottom of the script, wherever tracking currently is.
-                        // Rendered position is scrollOffset + manualOffset.
-                        let topOffset = initialScrollOffset(containerHeight: containerHeight)
-                        let bottomOffset = -max(0, maxY - containerHeight * 0.5)
-
+                        let bounds = manualOffsetBounds(containerHeight: geo.size.height)
                         let newOffset = manualOffset + delta
-                        let upperBound = max(0, topOffset - scrollOffset)
-                        let lowerBound = min(0, bottomOffset - scrollOffset)
 
-                        if newOffset > upperBound {
-                            let over = newOffset - upperBound
-                            manualOffset = upperBound + over * 0.2
-                        } else if newOffset < lowerBound {
-                            let over = lowerBound - newOffset
-                            manualOffset = lowerBound - over * 0.2
+                        if newOffset > bounds.upper {
+                            let over = newOffset - bounds.upper
+                            manualOffset = bounds.upper + over * 0.2
+                        } else if newOffset < bounds.lower {
+                            let over = bounds.lower - newOffset
+                            manualOffset = bounds.lower - over * 0.2
                         } else {
                             manualOffset = newOffset
                         }
@@ -341,29 +391,13 @@ struct SpeechScrollView: View {
                             allowsNextBackwardTrackingUpdate = true
                             onManualScroll?(false, newProgress)
                         } else if isListening {
-                            // Live word tracking: glide back to the tracked
-                            // position after a pause long enough to find a
-                            // spot and click it. Each new scroll invalidates
-                            // the earlier timer, so a stale one cannot reset
-                            // the view mid-hunt.
-                            peekResetGeneration += 1
-                            let generation = peekResetGeneration
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
-                                if generation == peekResetGeneration, !isUserScrolling {
-                                    withAnimation(.easeInOut(duration: 0.4)) {
-                                        manualOffset = 0
-                                    }
-                                }
-                            }
+                            // Live word tracking: onScroll starts the glide-back
+                            // timer, so the end of a gesture changes nothing.
                         } else {
-                            let maxY = wordYPositions.values.max() ?? 0
-                            let containerHeight = geo.size.height
-                            let upperBound = containerHeight * 0.5
-                            let lowerBound = -max(0, maxY - containerHeight * 0.5)
-
-                            if manualOffset > upperBound || manualOffset < lowerBound {
+                            let bounds = manualOffsetBounds(containerHeight: geo.size.height)
+                            if manualOffset > bounds.upper || manualOffset < bounds.lower {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    manualOffset = min(upperBound, max(lowerBound, manualOffset))
+                                    manualOffset = min(bounds.upper, max(bounds.lower, manualOffset))
                                 }
                             }
                         }
@@ -404,9 +438,60 @@ struct SpeechScrollView: View {
         }
     }
 
+    /// The range of manualOffset that keeps the rendered position
+    /// (scrollOffset + manualOffset) between the top of the script and its
+    /// lowest rendered word, wherever tracking is. 0 is always in the range.
+    static func manualOffsetBounds(
+        scrollOffset: CGFloat,
+        topOffset: CGFloat,
+        maxWordY: CGFloat,
+        containerHeight: CGFloat
+    ) -> (lower: CGFloat, upper: CGFloat) {
+        let bottomOffset = -max(0, maxWordY - containerHeight * 0.5)
+        return (min(0, bottomOffset - scrollOffset), max(0, topOffset - scrollOffset))
+    }
+
+    private func manualOffsetBounds(containerHeight: CGFloat) -> (lower: CGFloat, upper: CGFloat) {
+        Self.manualOffsetBounds(
+            scrollOffset: scrollOffset,
+            topOffset: initialScrollOffset(containerHeight: containerHeight),
+            maxWordY: wordYPositions.values.max() ?? 0,
+            containerHeight: containerHeight
+        )
+    }
+
+    /// Live word tracking: glide back to the tracked line 6 s after the last
+    /// scroll. A newer scroll, a tap, a pause or a resume changes
+    /// peekResetGeneration, and that cancels this timer.
+    private func schedulePeekGlideBack() {
+        let generation = peekResetGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+            // Read only @State here. The plain properties of this copy still
+            // hold their values from when the timer started.
+            guard generation == peekResetGeneration else { return }
+            // Only the lines near the tracked line are rendered at the end, so
+            // a longer glide would pass through empty space. Jump instead.
+            let glide: Animation? = abs(manualOffset) <= wordFlowCullingBuffer
+                ? .easeInOut(duration: 0.4)
+                : nil
+            var transaction = Transaction(animation: glide)
+            // Keep the implicit 0.15 s manualOffset animation from replacing it.
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                manualOffset = 0
+            }
+        }
+    }
+
     private func recalculateTracking(containerHeight: CGFloat) {
+        // The highlight moves back only on deliberate events: a confirmed
+        // re-read, a tap in another view, a new session or a text edit. The
+        // view follows such a move, however short it is.
+        let highlightMovedBack = highlightedCharCount < trackedCharCount
+        trackedCharCount = highlightedCharCount
+
         if readingPosition == .nearTop {
-            recalcTopWithPreviousLine()
+            recalcTopWithPreviousLine(highlightMovedBack: highlightMovedBack)
             return
         }
 
@@ -424,15 +509,13 @@ struct SpeechScrollView: View {
             applyTrackingTarget(bottomAnchor - interpolatedY)
         } else {
             // Word-tracking/voice-activated: active word at vertical center
-            let wordIdx = activeWordIndex()
-            if let wordY = wordYPositions[wordIdx] {
-                let target = center - wordY
-                applyTrackingTarget(target)
+            if let wordY = trackingWordY(activeWordIndex()) {
+                applyTrackingTarget(center - wordY, followsBack: highlightMovedBack)
             }
         }
     }
 
-    private func recalcTopWithPreviousLine() {
+    private func recalcTopWithPreviousLine(highlightMovedBack: Bool) {
         if smoothScroll {
             let wordIdx = Int(smoothWordProgress)
             let fraction = smoothWordProgress - Double(wordIdx)
@@ -443,15 +526,31 @@ struct SpeechScrollView: View {
             let target = min(interpolatedY, topReadingAnchor) - interpolatedY
             applyTrackingTarget(target)
         } else {
-            let wordIdx = activeWordIndex()
-            guard let wordY = wordYPositions[wordIdx] else { return }
+            guard let wordY = trackingWordY(activeWordIndex()) else { return }
             let target = min(wordY, topReadingAnchor) - wordY
-            applyTrackingTarget(target)
+            applyTrackingTarget(target, followsBack: highlightMovedBack)
         }
     }
 
+    /// The Y of a word for word tracking, from the line layout. The measured
+    /// positions are only a fallback: while the text scrolls, they are off by
+    /// the distance that the scroll still has to go, and a word that is not
+    /// rendered has none.
+    private func trackingWordY(_ wordIndex: Int) -> CGFloat? {
+        if layoutWidth > 0, let layoutY = WordFlowLayout(
+            words: words,
+            highlightedCharCount: highlightedCharCount,
+            font: font,
+            paragraphBreakBeforeWordIndices: paragraphBreakBeforeWordIndices,
+            containerWidth: layoutWidth
+        ).midY(ofWordAt: wordIndex) {
+            return layoutY
+        }
+        return wordYPositions[wordIndex]
+    }
+
     private func repositionTracking(toWordIndex wordIndex: Int) {
-        guard let wordY = wordYPositions[wordIndex] else { return }
+        guard let wordY = trackingWordY(wordIndex) else { return }
 
         let target: CGFloat
         switch readingPosition {
@@ -512,18 +611,30 @@ struct SpeechScrollView: View {
 
     /// Normal reading progress may only move the text upward. Brief backward
     /// corrections from speech recognition must not produce a down/up bounce.
-    /// Explicit taps and manual scrolling opt into one backward reposition.
-    private func applyTrackingTarget(_ target: CGFloat, force: Bool = false) {
-        // The recogniser only moves backward on a deliberate jump or a
-        // confirmed re-read, never by jitter, so a backward target of a line
-        // or more is a real regression and the view should follow it.
+    /// Explicit taps and manual scrolling opt into one backward reposition,
+    /// and a highlight that moved back is followed in either direction.
+    private func applyTrackingTarget(_ target: CGFloat, force: Bool = false, followsBack: Bool = false) {
+        // Other backward targets come from measured positions (smooth
+        // scrolling) or from a layout change, such as a smaller font. Follow
+        // only a large one.
         let regressionThreshold = (stableLineAdvance ?? 40) * 0.9
-        if !hasAppliedTrackingTarget
+        if followsBack
+            || force
+            || !hasAppliedTrackingTarget
             || target < scrollOffset - 1
             || target > scrollOffset + regressionThreshold
-            || allowsNextBackwardTrackingUpdate
-            || force {
-            scrollOffset = target
+            || allowsNextBackwardTrackingUpdate {
+            if !smoothScroll, abs(target - scrollOffset) > wordFlowCullingBuffer {
+                // Only the lines near the target are rendered, so a glide
+                // this long would pass through empty space. Jump instead.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    scrollOffset = target
+                }
+            } else {
+                scrollOffset = target
+            }
         }
         hasAppliedTrackingTarget = true
         allowsNextBackwardTrackingUpdate = false
@@ -625,6 +736,34 @@ struct WordFlowLayout: View {
         return ratio > 1.5 ? 2 : 8
     }
 
+    /// Height of one row of text. body gives every row this height, so the
+    /// culling spacers and layoutMidY match the rendered rows.
+    static func rowHeight(for font: NSFont) -> CGFloat {
+        (font.ascender - font.descender + font.leading).rounded(.up)
+    }
+
+    /// The midY that the view of word `wordIndex` reports in "flowLayout"
+    /// space, computed as body places the rows: lineTop, the paragraph
+    /// divider space, then half a row. Nil when no line holds the word.
+    static func layoutMidY(
+        ofWordAt wordIndex: Int,
+        lines: [[WordItem]],
+        paragraphPrefixCounts: [Int],
+        rowHeight: CGFloat,
+        lineSpacing: CGFloat,
+        paragraphSpacing: CGFloat
+    ) -> CGFloat? {
+        guard let lineIndex = lines.firstIndex(where: { ($0.last?.id ?? -1) >= wordIndex }),
+              let firstWord = lines[lineIndex].first, firstWord.id <= wordIndex,
+              lineIndex + 1 < paragraphPrefixCounts.count else { return nil }
+        let beginsParagraph = paragraphPrefixCounts[lineIndex + 1]
+            > paragraphPrefixCounts[lineIndex]
+        return CGFloat(lineIndex) * (rowHeight + lineSpacing)
+            + CGFloat(paragraphPrefixCounts[lineIndex]) * paragraphSpacing
+            + (beginsParagraph ? paragraphSpacing : 0)
+            + rowHeight * 0.5
+    }
+
     // Simple layout cache to avoid re-measuring words on every highlight update
     private static var _cacheKey: String = ""
     private static var _cachedItems: [WordItem] = []
@@ -656,6 +795,21 @@ struct WordFlowLayout: View {
         Self._cachedLines = lines
         Self._cachedParagraphPrefixCounts = paragraphPrefixCounts
         return (items, lines, paragraphPrefixCounts)
+    }
+
+    /// Where word `wordIndex` sits in this layout, also when its line is
+    /// culled and so reports no position. Uses the keyed cache, so it never
+    /// reads the lines of another view.
+    func midY(ofWordAt wordIndex: Int) -> CGFloat? {
+        let (_, lines, paragraphPrefixCounts) = cachedLayout()
+        return Self.layoutMidY(
+            ofWordAt: wordIndex,
+            lines: lines,
+            paragraphPrefixCounts: paragraphPrefixCounts,
+            rowHeight: Self.rowHeight(for: font),
+            lineSpacing: lineSpacing,
+            paragraphSpacing: paragraphDividerExtraSpacing
+        )
     }
 
     // Find the index of the next word to read (first non-fully-lit, non-annotation word)
@@ -692,8 +846,9 @@ struct WordFlowLayout: View {
         let totalLines = lines.count
         let rtl = isRightToLeft(items: items)
 
-        // Estimate line height for visibility culling using actual font metrics
-        let rowHeight = ceil(font.ascender - font.descender + font.leading)
+        // Row height from the font metrics. Each row gets this height below,
+        // so the culling math is exact.
+        let rowHeight = Self.rowHeight(for: font)
         let lineH = rowHeight + lineSpacing
         let lineTop: (Int) -> CGFloat = { lineIndex in
             CGFloat(lineIndex) * lineH
@@ -708,7 +863,7 @@ struct WordFlowLayout: View {
 
         // Determine visible range of lines
         let canCull = viewportHeight > 0 && totalLines > 0
-        let buffer: CGFloat = 400
+        let buffer = wordFlowCullingBuffer
         let startLine: Int = {
             guard canCull else { return 0 }
             let visibleMinY = -scrollOffset - buffer
@@ -753,6 +908,9 @@ struct WordFlowLayout: View {
                             .id(item.id)
                     }
                 }
+                // SwiftUI's own text height can be 1 pt more or less than
+                // rowHeight, and that error adds up over the lines.
+                .frame(height: rowHeight)
                 .frame(maxWidth: .infinity, alignment: rtl ? .trailing : .leading)
                 .padding(.top, beginsParagraph ? paragraphDividerExtraSpacing : 0)
                 .overlay(alignment: .top) {

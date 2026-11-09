@@ -409,19 +409,25 @@ class NotchSettings {
     var externalTextScale: Double {
         didSet { UserDefaults.standard.set(externalTextScale, forKey: "externalTextScale") }
     }
-    /// External display column width, as a fraction of the screen width (0.4–1.0).
+    /// External display column width, as a fraction of the automatic width (0.4–1.0).
     var externalColumnWidth: Double {
         didSet { UserDefaults.standard.set(externalColumnWidth, forKey: "externalColumnWidth") }
     }
 
+    /// Axis for the external display's Mirror mode.
     var mirrorAxis: MirrorAxis {
         didSet { UserDefaults.standard.set(mirrorAxis.rawValue, forKey: "mirrorAxis") }
     }
 
-    /// Mirror the Floating Window and Fullscreen overlays, using `mirrorAxis`.
-    /// The external display has its own Mirror mode and is unaffected.
+    /// Mirror the Floating Window and Fullscreen overlays, using
+    /// `overlayMirrorAxis`. The external display uses its own Mirror mode and
+    /// `mirrorAxis`.
     var mirrorOverlay: Bool {
         didSet { UserDefaults.standard.set(mirrorOverlay, forKey: "mirrorOverlay") }
+    }
+
+    var overlayMirrorAxis: MirrorAxis {
+        didSet { UserDefaults.standard.set(overlayMirrorAxis.rawValue, forKey: "overlayMirrorAxis") }
     }
 
     var listeningMode: ListeningMode {
@@ -543,8 +549,18 @@ class NotchSettings {
         self.externalTextScale = savedScale > 0 ? savedScale : 1.0
         let savedCol = UserDefaults.standard.double(forKey: "externalColumnWidth")
         self.externalColumnWidth = savedCol > 0 ? savedCol : 1.0
-        self.mirrorAxis = MirrorAxis(rawValue: UserDefaults.standard.string(forKey: "mirrorAxis") ?? "") ?? .horizontal
+        let savedMirrorAxis = MirrorAxis(rawValue: UserDefaults.standard.string(forKey: "mirrorAxis") ?? "") ?? .horizontal
+        self.mirrorAxis = savedMirrorAxis
         self.mirrorOverlay = UserDefaults.standard.object(forKey: "mirrorOverlay") as? Bool ?? false
+        if let savedOverlayAxis = MirrorAxis(rawValue: UserDefaults.standard.string(forKey: "overlayMirrorAxis") ?? "") {
+            self.overlayMirrorAxis = savedOverlayAxis
+        } else {
+            // The overlays shared `mirrorAxis` before. Start from it and save
+            // at once (didSet does not run in init), so a later change on the
+            // External tab cannot reach the overlays.
+            self.overlayMirrorAxis = savedMirrorAxis
+            UserDefaults.standard.set(savedMirrorAxis.rawValue, forKey: "overlayMirrorAxis")
+        }
         self.listeningMode = ListeningMode(rawValue: UserDefaults.standard.string(forKey: "listeningMode") ?? "") ?? .wordTracking
         let savedSpeed = UserDefaults.standard.double(forKey: "scrollSpeed")
         self.scrollSpeed = savedSpeed > 0 ? savedSpeed : 3

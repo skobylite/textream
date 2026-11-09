@@ -70,10 +70,10 @@ struct HighlightingTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
 
+        // Typing updates `text` itself, so this runs only for text set by
+        // the app: another page, a vault note, dictation.
         if textView.string != text {
-            let selectedRanges = textView.selectedRanges
-            textView.string = text
-            textView.selectedRanges = selectedRanges
+            Self.replaceText(of: textView, with: text)
             context.coordinator.applyHighlighting(textView)
         }
         updateWritingDirection(textView, text: text)
@@ -92,6 +92,16 @@ struct HighlightingTextEditor: NSViewRepresentable {
                 self.caretPosition = nil
             }
         }
+    }
+
+    /// Shows new text and keeps the selection. The undo steps of the old text
+    /// point at places in that text: Cmd-Z would change the wrong characters
+    /// of the new text (and sync them into a vault note), so they are removed.
+    static func replaceText(of textView: NSTextView, with text: String) {
+        let selectedRanges = textView.selectedRanges
+        textView.undoManager?.removeAllActions()
+        textView.string = text
+        textView.selectedRanges = selectedRanges
     }
 
     /// Set the text view's base writing direction based on the content's script.

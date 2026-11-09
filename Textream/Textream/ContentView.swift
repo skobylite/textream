@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var isDroppingPresentation = false
     @State private var dropError: String?
     @State private var dropAlertTitle: String = "Import Error"
+    @State private var markDoneError: String?
     @State private var showSettings = false
     @State private var showAbout = false
     @State private var languageSuggestion: SpeechLanguageSuggestion?
@@ -526,6 +527,14 @@ Happy presenting! [wave]
         } message: {
             Text(dictation.error ?? "")
         }
+        .alert("Script Not Marked Done", isPresented: Binding(
+            get: { markDoneError != nil },
+            set: { if !$0 { markDoneError = nil } }
+        )) {
+            Button("OK") { markDoneError = nil }
+        } message: {
+            Text(markDoneError ?? "")
+        }
         .frame(minWidth: 360, minHeight: 240)
         .background(.ultraThinMaterial)
         .toolbar {
@@ -538,7 +547,7 @@ Happy presenting! [wave]
                         service.openFile()
                     } label: {
                         HStack(spacing: 4) {
-                            if service.currentFileURL != nil && service.pages != service.savedPages {
+                            if service.currentFileURL != nil && service.hasUnsavedChanges {
                                 Circle()
                                     .fill(.orange)
                                     .frame(width: 6, height: 6)
@@ -558,7 +567,7 @@ Happy presenting! [wave]
                         }
                         withAnimation(.easeInOut(duration: 0.2)) {
                             service.pages.append("")
-                            service.currentPageIndex = service.pages.count - 1
+                            moveToPage(service.pages.count - 1)
                         }
                     } label: {
                         HStack(spacing: 3) {
@@ -623,7 +632,7 @@ Happy presenting! [wave]
             }
             withAnimation(.easeInOut(duration: 0.2)) {
                 service.pages.append("")
-                service.currentPageIndex = service.pages.count - 1
+                moveToPage(service.pages.count - 1)
             }
             isTextFocused = true
         }
@@ -643,19 +652,15 @@ Happy presenting! [wave]
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // Sync button state when app is re-activated (e.g. dock click)
             isRunning = service.overlayController.isShowing
+            // Scripts can change in Obsidian while Textream is in the background.
+            ScriptQueue.shared.rescan()
         }
         .onChange(of: service.currentPageText, initial: true) { _, text in
             scheduleLanguageDetection(for: text)
         }
-        .onChange(of: service.currentPageIndex) { old, new in
+        .onChange(of: service.currentPageIndex) { _, _ in
             if isRecording {
                 stopRecording()
-            }
-            // Empty scripts clean themselves up when you move off them.
-            if old != new, old < service.pages.count, service.pages.count > 1,
-               service.pages[old].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                service.pages.remove(at: old)
-                if service.currentPageIndex > old { service.currentPageIndex -= 1 }
             }
             ignoredLanguageIdentifier = nil
             scheduleLanguageDetection(for: service.currentPageText)
@@ -715,11 +720,33 @@ Happy presenting! [wave]
                         stopRecording()
                     }
                     withAnimation(.easeInOut(duration: 0.15)) {
-                        service.currentPageIndex = index
+                        moveToPage(index)
                     }
                 }
             }
         )
+    }
+
+    /// Selects another page. A blank page that is left is removed (never the
+    /// only page). Only the user's own page moves do this (and loadScript): a
+    /// replaced page list (file open, import, Director) or a page change made
+    /// by the prompter must never lose a page.
+    private func moveToPage(_ index: Int) {
+        let move = Self.leavingBlankPage(service.pages, from: service.currentPageIndex, to: index)
+        if let blank = move.remove {
+            service.pages.remove(at: blank)
+        }
+        service.currentPageIndex = move.target
+    }
+
+    /// Moving from page `old` to page `target`: the blank page that is left
+    /// is removed, unless it is the only page. Returns the page to remove
+    /// and the index of `target` after that.
+    private static func leavingBlankPage(_ pages: [String], from old: Int, to target: Int) -> (remove: Int?, target: Int) {
+        guard old != target, old < pages.count, pages.count > 1,
+              pages[old].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return (nil, target) }
+        return (old, target > old ? target - 1 : target)
     }
 
     private var pageSidebar: some View {
@@ -740,10 +767,14 @@ Happy presenting! [wave]
                 }
                 .tag(index)
                 .contextMenu {
-                    Button {
-                        markPageDone(at: index)
-                    } label: {
-                        Label("Mark Done", systemImage: "checkmark.circle")
+                    // Only the vault page has a note to mark done. Other
+                    // pages use Delete Page.
+                    if ScriptQueue.shared.pageOrigins[index] != nil {
+                        Button {
+                            markPageDone(at: index)
+                        } label: {
+                            Label("Mark Done", systemImage: "checkmark.circle")
+                        }
                     }
                     if service.pages.count > 1 {
                         Button(role: .destructive) {
@@ -755,11 +786,16 @@ Happy presenting! [wave]
                 }
             }
 
-            ScriptQueueSection()
+            ScriptQueueSection(
+                currentPageIndex: service.currentPageIndex,
+                onLoad: { loadScript($0) },
+                onMarkDone: { markScriptDone($0) }
+            )
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                ScriptQueueMessage()
                 RemoteQRPanel()
 
                 Button {
@@ -768,7 +804,7 @@ Happy presenting! [wave]
                     }
                     withAnimation(.easeInOut(duration: 0.2)) {
                         service.pages.append("")
-                        service.currentPageIndex = service.pages.count - 1
+                        moveToPage(service.pages.count - 1)
                     }
                 } label: {
                     Label("Add Page", systemImage: "plus")
@@ -786,20 +822,64 @@ Happy presenting! [wave]
 
     // MARK: - Actions
 
-    /// Done = recorded: tag the vault note when this page came from the vault,
-    /// then drop the page from the scratchpad.
+    /// Done = recorded: tag the vault page's note done (markDone saves the
+    /// page's edits to the note first), then drop the page from the
+    /// scratchpad. When the edits or the tag cannot be saved, the page stays
+    /// (it can lose its link to the note), and an alert shows why.
     private func markPageDone(at index: Int) {
-        guard index < service.pages.count else { return }
-        if let path = ScriptQueue.shared.pageOrigins[index] {
-            ScriptQueue.shared.syncEdits()          // flush pending edits first
-            ScriptQueue.shared.markDone(path)
-            ScriptQueue.shared.clearOrigin(at: index)
+        let queue = ScriptQueue.shared
+        guard index < service.pages.count, let path = queue.pageOrigins[index] else { return }
+        if isRecording {
+            stopRecording()                         // dictation must not write into the page now
+        }
+        guard queue.markDone(path) else {
+            showMarkDoneProblem()
+            return
         }
         if service.pages.count > 1 {
             removePage(at: index)
         } else {
             service.pages[0] = ""
         }
+    }
+
+    /// A Scripts row was clicked. Dictation stops first, so it cannot write
+    /// into the note that replaces the page text. When the note opens on
+    /// another page, the blank page the owner was on is removed, as in
+    /// moveToPage.
+    private func loadScript(_ item: QueueItem) {
+        if isRecording {
+            stopRecording()
+        }
+        let left = service.currentPageIndex
+        ScriptQueue.shared.load(item)
+        let now = service.currentPageIndex
+        // Not when the note's page is blank too: then the two blank pages
+        // cannot be told apart, and the note would lose its page.
+        guard now < service.pages.count,
+              !service.pages[now].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let move = Self.leavingBlankPage(service.pages, from: left, to: now)
+        if let blank = move.remove {
+            service.pages.remove(at: blank)
+            service.currentPageIndex = move.target
+        }
+    }
+
+    /// Mark Done from the Scripts list. The note in the vault page goes
+    /// through the page's Mark Done; another note only gets the tag.
+    private func markScriptDone(_ item: QueueItem) {
+        let queue = ScriptQueue.shared
+        if item.id == queue.slotPath, let index = queue.slotIndex {
+            markPageDone(at: index)
+        } else if !queue.markDone(item.id) {
+            showMarkDoneProblem()
+        }
+    }
+
+    /// The sidebar also shows the reason, but it can be hidden while the
+    /// toolbar's Mark Script Done is used.
+    private func showMarkDoneProblem() {
+        markDoneError = ScriptQueue.shared.noteError ?? "The note is not marked done."
     }
 
     private func removePage(at index: Int) {
@@ -1003,7 +1083,9 @@ private struct RemoteQRPanel: View {
     }
 
     var body: some View {
-        Group {
+        // A VStack, not a Group: with no QR yet a Group has no view, so its
+        // onAppear never runs and the address is never read.
+        VStack(spacing: 0) {
             if let url {
                 VStack(spacing: 6) {
                     Divider()
@@ -1060,49 +1142,73 @@ private struct RemoteQRPanel: View {
 
 // MARK: - Script Queue Section
 
+/// The last vault problem, at the bottom of the sidebar, so it stays in view
+/// when the Scripts list scrolls. The list can have hundreds of rows, so a
+/// message at its end is not seen. The sidebar can be hidden, so a refused
+/// Mark Done also shows its reason in an alert. Local-only.
+private struct ScriptQueueMessage: View {
+    @State private var queue = ScriptQueue.shared
+
+    var body: some View {
+        if let err = queue.lastError {
+            Text(err)
+                .font(.system(size: 10))
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+        }
+    }
+}
+
 /// Sidebar section listing vault notes tagged `script` and not `done`. Local-only.
 private struct ScriptQueueSection: View {
+    /// The selected page, so the row of the note shown in the editor is marked.
+    let currentPageIndex: Int
+    /// ContentView handles the row actions: they stop dictation first.
+    let onLoad: (QueueItem) -> Void
+    let onMarkDone: (QueueItem) -> Void
     @State private var queue = ScriptQueue.shared
-    @State private var expanded = false
 
     var body: some View {
         Section {
-            if true {
-                ForEach(queue.items) { item in
-                    Button {
-                        queue.load(item)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(item.title)
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                            if !item.status.isEmpty || item.completion != nil {
-                                Text([item.completion.map { "\($0)%" }, item.status.isEmpty ? nil : item.status]
-                                    .compactMap { $0 }.joined(separator: " · "))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                            }
+            ForEach(queue.items) { item in
+                Button {
+                    onLoad(item)
+                } label: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                        if !item.status.isEmpty || item.completion != nil {
+                            Text([item.completion.map { "\($0)%" }, item.status.isEmpty ? nil : item.status]
+                                .compactMap { $0 }.joined(separator: " · "))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
                         }
-                        .foregroundStyle(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id ? .primary : .secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 5)
-                        .contentShape(Rectangle())
+                        if let base = item.duplicateOf {
+                            Text("Possible copy of “\(base)”")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 8))
-                    .listRowBackground(queue.pageOrigins[TextreamService.shared.currentPageIndex] == item.id
-                        ? Color.accentColor.opacity(0.15) : nil)
-                    .contextMenu {
-                        Button("Mark Done") { queue.markDone(item.id) }
-                    }
+                    .foregroundStyle(queue.pageOrigins[currentPageIndex] == item.id ? .primary : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
                 }
-                if let err = queue.lastError {
-                    Text(err).font(.system(size: 9)).foregroundStyle(.red)
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 8))
+                .listRowBackground(queue.pageOrigins[currentPageIndex] == item.id
+                    ? Color.accentColor.opacity(0.15) : nil)
+                .contextMenu {
+                    Button("Mark Done") { onMarkDone(item) }
                 }
             }
         } header: {
             Button {
-                if queue.vaultURL == nil { queue.pickVault() }
+                if queue.vaultURL == nil { queue.pickVault() } else { queue.rescan() }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "tray.full")

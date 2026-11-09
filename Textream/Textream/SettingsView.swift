@@ -16,9 +16,6 @@ import CoreImage.CIFilterBuiltins
 class NotchPreviewController {
     private var panel: NSPanel?
     private var hostingView: NSHostingView<NotchPreviewContent>?
-    private var originalFrame: NSRect?
-    private var cursorTimer: AnyCancellable?
-    private var trackingSettings: NotchSettings?
 
     func show(settings: NotchSettings) {
         // If panel already exists, just re-show it
@@ -63,96 +60,9 @@ class NotchPreviewController {
     }
 
     func dismiss() {
-        stopCursorTracking()
         panel?.orderOut(nil)
         panel = nil
         hostingView = nil
-        originalFrame = nil
-    }
-
-    var isAtCursor: Bool { originalFrame != nil }
-
-    func animateToCursor(settings: NotchSettings) {
-        guard let panel else { return }
-        if originalFrame == nil {
-            originalFrame = panel.frame
-        }
-        trackingSettings = settings
-
-        // Animate to cursor, then start continuous tracking
-        let target = cursorFrame(for: panel, settings: settings)
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.5
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(target, display: true)
-        }, completionHandler: { [weak self] in
-            self?.startCursorTracking()
-        })
-    }
-
-    func animateFromCursor() {
-        stopCursorTracking()
-        guard let panel, let originalFrame else { return }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.5
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(originalFrame, display: true)
-        }
-        self.originalFrame = nil
-        self.trackingSettings = nil
-    }
-
-    private func cursorFrame(for panel: NSPanel, settings: NotchSettings) -> NSRect {
-        let mouse = NSEvent.mouseLocation
-        let cursorOffset: CGFloat = 8
-        let screenEdgeMargin: CGFloat = 5
-        let floatingTopPadding: CGFloat = 14
-        let floatingVerticalOffset: CGFloat = 60
-        let maxWidth = panel.frame.width
-        let notchWidth = settings.notchWidth
-        let panelHeight = panel.frame.height
-        let visibleHeight = floatingTopPadding + settings.textAreaHeight
-        let horizontalInset = (maxWidth - notchWidth) / 2
-
-        var visibleLeft = mouse.x + cursorOffset
-        var visibleBottom = mouse.y - visibleHeight
-
-        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
-            ?? panel.screen
-            ?? NSScreen.main {
-            let screenFrame = screen.frame
-            let minimumVisibleLeft = screenFrame.minX + screenEdgeMargin
-            let maximumVisibleLeft = max(
-                minimumVisibleLeft,
-                screenFrame.maxX - notchWidth - screenEdgeMargin
-            )
-            visibleLeft = min(max(visibleLeft, minimumVisibleLeft), maximumVisibleLeft)
-            visibleBottom = max(visibleBottom, screenFrame.minY + screenEdgeMargin)
-        }
-
-        let panelX = visibleLeft - horizontalInset
-        let panelY = visibleBottom - (panelHeight - floatingVerticalOffset - visibleHeight)
-        return NSRect(x: panelX, y: panelY, width: maxWidth, height: panelHeight)
-    }
-
-    private func startCursorTracking() {
-        cursorTimer?.cancel()
-        cursorTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.updatePreviewPosition()
-            }
-    }
-
-    private func stopCursorTracking() {
-        cursorTimer?.cancel()
-        cursorTimer = nil
-    }
-
-    private func updatePreviewPosition() {
-        guard let panel, let settings = trackingSettings else { return }
-        let target = cursorFrame(for: panel, settings: settings)
-        panel.setFrame(target, display: false)
     }
 }
 
@@ -496,11 +406,16 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             showPreviewIfIdle(settings)
         }
-        .onChange(of: settings.followCursorWhenUndocked) { _, follow in
-            if follow && settings.overlayMode == .floating {
-                previewController.animateToCursor(settings: settings)
-            } else {
-                previewController.animateFromCursor()
+        // A session can start while Settings stays open (a Director start, or
+        // Cmd-Return from the sheet).
+        .onReceive(NotificationCenter.default.publisher(for: .prompterOverlaySessionDidStart)) { _ in
+            previewController.hide()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .prompterOverlaySessionDidEnd)) { _ in
+            // Only while Textream is in front: the preview panel stays on top
+            // of other apps. Otherwise didBecomeActive shows it.
+            if NSApp.isActive {
+                showPreviewIfIdle(settings)
             }
         }
         .onChange(of: settings.overlayMode) { _, mode in
@@ -508,11 +423,6 @@ struct SettingsView: View {
                 previewController.hide()
             } else {
                 previewController.show(settings: settings)
-                if mode == .floating && settings.followCursorWhenUndocked {
-                    previewController.animateToCursor(settings: settings)
-                } else if previewController.isAtCursor {
-                    previewController.animateFromCursor()
-                }
             }
         }
     }
@@ -529,11 +439,6 @@ struct SettingsView: View {
     private func showPreviewIfIdle(_ settings: NotchSettings) {
         guard !isPrompterRunning, settings.overlayMode == .pinned else { return }
         previewController.show(settings: settings)
-        if settings.followCursorWhenUndocked && settings.overlayMode == .floating {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                previewController.animateToCursor(settings: settings)
-            }
-        }
     }
 
     // MARK: - Appearance Tab
@@ -929,6 +834,11 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if settings.overlayMode != .pinned {
+                    // A window that follows the cursor is never mirrored. The
+                    // controls are disabled for it but keep their place, so the
+                    // Follow Cursor switch below does not move.
+                    let followsCursor = settings.overlayMode == .floating && settings.followCursorWhenUndocked
+
                     Divider()
 
                     Toggle(isOn: $settings.mirrorOverlay) {
@@ -936,21 +846,23 @@ struct SettingsView: View {
                             .font(.system(size: 13, weight: .medium))
                     }
                     .toggleStyle(.switch)
+                    .disabled(followsCursor)
 
                     Text("Flips the overlay for a teleprompter mirror rig.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
                     if settings.mirrorOverlay {
-                        Picker("", selection: $settings.mirrorAxis) {
+                        Picker("", selection: $settings.overlayMirrorAxis) {
                             ForEach(MirrorAxis.allCases) { axis in
                                 Text(axis.label).tag(axis)
                             }
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .disabled(followsCursor)
 
-                        Text(settings.mirrorAxis.description)
+                        Text(settings.overlayMirrorAxis.description)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -1163,74 +1075,75 @@ struct SettingsView: View {
     @State private var availableScreens: [NSScreen] = []
 
     private var externalTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Show the teleprompter on an external display or Sidecar iPad.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Show the teleprompter on an external display or Sidecar iPad.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
 
-            Picker("", selection: $settings.externalDisplayMode) {
-                ForEach(ExternalDisplayMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            Text(settings.externalDisplayMode.description)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-
-            if settings.externalDisplayMode == .mirror {
-                Divider()
-
-                Text("Mirror Axis")
-                    .font(.system(size: 13, weight: .medium))
-
-                Picker("", selection: $settings.mirrorAxis) {
-                    ForEach(MirrorAxis.allCases) { axis in
-                        Text(axis.label).tag(axis)
+                Picker("", selection: $settings.externalDisplayMode) {
+                    ForEach(ExternalDisplayMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                Text(settings.mirrorAxis.description)
+                Text(settings.externalDisplayMode.description)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+
+                if settings.externalDisplayMode == .mirror {
+                    Divider()
+
+                    Text("Mirror Axis")
+                        .font(.system(size: 13, weight: .medium))
+
+                    Picker("", selection: $settings.mirrorAxis) {
+                        ForEach(MirrorAxis.allCases) { axis in
+                            Text(axis.label).tag(axis)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    Text(settings.mirrorAxis.description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                if settings.externalDisplayMode != .off {
+                    Divider()
+
+                    Text("Text Size")
+                        .font(.system(size: 13, weight: .medium))
+                    Slider(value: $settings.externalTextScale, in: 0.4...1.0, step: 0.05)
+                    Text("\(Int(settings.externalTextScale * 100))% of the automatic size.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    Text("Column Width")
+                        .font(.system(size: 13, weight: .medium))
+                    Slider(value: $settings.externalColumnWidth, in: 0.4...1.0, step: 0.05)
+                    Text("\(Int(settings.externalColumnWidth * 100))% of the automatic width. A narrower column adds side margins and decreases eye movement.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    Divider()
+
+                    Text("Target Display")
+                        .font(.system(size: 13, weight: .medium))
+
+                    displayPicker(
+                        screens: availableScreens,
+                        selectedID: $settings.externalScreenID,
+                        onRefresh: { refreshScreens() },
+                        emptyMessage: "No external displays detected. Connect a display or enable Sidecar."
+                    )
+                }
             }
-
-            if settings.externalDisplayMode != .off {
-                Divider()
-
-                Text("Text Size")
-                    .font(.system(size: 13, weight: .medium))
-                Slider(value: $settings.externalTextScale, in: 0.4...1.0, step: 0.05)
-                Text("\(Int(settings.externalTextScale * 100))% of the automatic size.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                Text("Column Width")
-                    .font(.system(size: 13, weight: .medium))
-                Slider(value: $settings.externalColumnWidth, in: 0.4...1.0, step: 0.05)
-                Text("\(Int(settings.externalColumnWidth * 100))% of the screen width. Narrower adds side margins and reduces eye movement.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                Divider()
-
-                Text("Target Display")
-                    .font(.system(size: 13, weight: .medium))
-
-                displayPicker(
-                    screens: availableScreens,
-                    selectedID: $settings.externalScreenID,
-                    onRefresh: { refreshScreens() },
-                    emptyMessage: "No external displays detected. Connect a display or enable Sidecar."
-                )
-            }
-            Spacer()
+            .padding(16)
         }
-        .padding(16)
         .onAppear { refreshScreens() }
     }
 
@@ -1583,6 +1496,7 @@ struct SettingsView: View {
         settings.externalColumnWidth = 1.0
         settings.mirrorAxis = .horizontal
         settings.mirrorOverlay = false
+        settings.overlayMirrorAxis = .horizontal
         settings.listeningMode = .wordTracking
         settings.scrollSpeed = 3
         settings.showElapsedTime = true

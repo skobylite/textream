@@ -246,8 +246,7 @@ struct ExternalDisplayView: View {
             let textScale = usesExternalSizing ? settings.externalTextScale : 1
             let column = usesExternalSizing ? settings.externalColumnWidth : 1
             let fontSize = max(48, min(96, geo.size.width / 14)) * textScale
-            // Narrower column: extra side margin split evenly on both sides.
-            let hPad = max(40, geo.size.width * 0.08) + geo.size.width * (1 - column) / 2
+            let hPad = Self.sidePadding(screenWidth: geo.size.width, column: column)
 
             VStack(spacing: 0) {
                 Spacer().frame(height: 20)
@@ -329,6 +328,14 @@ struct ExternalDisplayView: View {
                 .padding(.bottom, 40)
             }
         }
+    }
+
+    /// Side margin that makes the text column `column` times the automatic
+    /// width (the screen less a margin of max(40, 8%) on each side). At 1 it
+    /// is that automatic margin.
+    static func sidePadding(screenWidth: CGFloat, column: Double) -> CGFloat {
+        let base = max(40, screenWidth * 0.08)
+        return base + (screenWidth - 2 * base) * (1 - column) / 2
     }
 
     private var doneView: some View {

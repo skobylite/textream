@@ -52,6 +52,14 @@ class OverlayContent {
     var jumpToPageIndex: Int? = nil
 }
 
+extension Notification.Name {
+    /// Posted by NotchOverlayController after show() has put up its panel.
+    /// Page turns do not post it.
+    static let prompterOverlaySessionDidStart = Notification.Name("prompterOverlaySessionDidStart")
+    /// Posted when a session ends, after the panel is removed.
+    static let prompterOverlaySessionDidEnd = Notification.Name("prompterOverlaySessionDidEnd")
+}
+
 class NotchOverlayController: NSObject {
     private let cursorOffset: CGFloat = 8
     private let screenEdgeMargin: CGFloat = 5
@@ -131,6 +139,8 @@ class NotchOverlayController: NSObject {
         if settings.listeningMode != .classic {
             speechRecognizer.start(with: text)
         }
+
+        NotificationCenter.default.post(name: .prompterOverlaySessionDidStart, object: self)
     }
 
     func updateContent(text: String, hasNextPage: Bool) {
@@ -306,11 +316,9 @@ class NotchOverlayController: NSObject {
             baseHeight: panelHeight,
             followingCursor: true
         )
-        // Follow-cursor panels ignore mouse events, so the control would be
-        // unclickable there.
-        let contentView = NSHostingView(
-            rootView: MirroredOverlay(showsControl: false) { floatingView }
-        )
+        // Never mirrored: a window that follows the cursor cannot sit on a
+        // mirror rig, and it ignores clicks, so nothing could turn it off.
+        let contentView = NSHostingView(rootView: floatingView)
 
         let panel = NSPanel(
             contentRect: initialFrame,
@@ -344,7 +352,7 @@ class NotchOverlayController: NSObject {
             handlesAutoNextPage: true
         )
         let contentView = NSHostingView(
-            rootView: MirroredOverlay(showsControl: true) { fullscreenView }
+            rootView: MirroredOverlay { fullscreenView }
         )
 
         let panel = PrompterPanel(
@@ -381,8 +389,7 @@ class NotchOverlayController: NSObject {
             baseHeight: panelHeight
         )
         let contentView = NSHostingView(
-            rootView: MirroredOverlay(showsControl: true) { floatingView }
-                .overlay(alignment: .top) { FloatingDragBar() }
+            rootView: FloatingPanelRoot(speechRecognizer: speechRecognizer, floatingView: floatingView)
         )
 
         let panel = NSPanel(
@@ -431,6 +438,7 @@ class NotchOverlayController: NSObject {
             self.endKeepAwakeActivity()
             self.speechRecognizer.shouldDismiss = false
             self.isDismissing = false
+            NotificationCenter.default.post(name: .prompterOverlaySessionDidEnd, object: self)
             self.onComplete?()
         }
     }
@@ -501,6 +509,7 @@ class NotchOverlayController: NSObject {
                         self.frameTracker = nil
                         self.endKeepAwakeActivity()
                         self.speechRecognizer.shouldDismiss = false
+                        NotificationCenter.default.post(name: .prompterOverlaySessionDidEnd, object: self)
                         self.onComplete?()
                     }
                 }
@@ -1742,45 +1751,91 @@ struct FloatingOverlayView: View {
 
 // MARK: - Overlay Mirroring
 
-/// Flips an overlay for a teleprompter mirror rig and, where the panel accepts
-/// clicks, puts a Mirror toggle on top of it. The control is a sibling of the
-/// flipped content, so it stays upright and readable while mirroring is on.
+/// Flips an overlay for a teleprompter mirror rig and puts a Mirror toggle on
+/// it. The toggle sits inside the flip, at the content's top-leading corner
+/// where no control is, so on every axis the flip moves it to a corner that
+/// is clear of the timer and the control row.
 struct MirroredOverlay<Content: View>: View {
-    let showsControl: Bool
+    /// False for the Floating window: it shows the toggle only while
+    /// mirroring is on, so it can be turned off there. Settings turns it on.
+    var showsControlWhenOff = true
+    /// Lets the Floating window fade the toggle with its content.
+    var controlVisible = true
     @ViewBuilder let content: Content
 
     @State private var isHovering = false
 
     private var axis: MirrorAxis? {
         let settings = NotchSettings.shared
-        return settings.mirrorOverlay ? settings.mirrorAxis : nil
+        return settings.mirrorOverlay ? settings.overlayMirrorAxis : nil
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            content
-                .scaleEffect(x: axis?.scaleX ?? 1, y: axis?.scaleY ?? 1)
-
-            if showsControl {
-                Button {
-                    NotchSettings.shared.mirrorOverlay.toggle()
-                } label: {
-                    Image(systemName: "arrow.left.arrow.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(axis == nil ? Color.white.opacity(0.7) : Color.yellow)
-                        .frame(width: 26, height: 26)
-                        .background(
-                            Circle().fill(axis == nil
-                                          ? Color.white.opacity(0.12)
-                                          : Color.yellow.opacity(0.22))
-                        )
+        content
+            .overlay(alignment: .topLeading) {
+                if showsControlWhenOff || axis != nil {
+                    Button {
+                        NotchSettings.shared.mirrorOverlay.toggle()
+                    } label: {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(axis == nil ? Color.white.opacity(0.7) : Color.yellow)
+                            .frame(width: 26, height: 26)
+                            .background(
+                                Circle().fill(axis == nil
+                                              ? Color.white.opacity(0.12)
+                                              : Color.yellow.opacity(0.22))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(axis == nil ? "Mirror the prompter" : "Stop mirroring")
+                    .padding(10)
+                    .opacity(controlVisible ? (isHovering ? 1 : 0.35) : 0)
+                    .allowsHitTesting(controlVisible)
+                    .onHover { isHovering = $0 }
+                    .animation(.easeInOut(duration: 0.15), value: isHovering)
                 }
-                .buttonStyle(.plain)
-                .help(axis == nil ? "Mirror the prompter" : "Stop mirroring")
-                .padding(10)
-                .opacity(isHovering ? 1 : 0.35)
-                .onHover { isHovering = $0 }
-                .animation(.easeInOut(duration: 0.15), value: isHovering)
+            }
+            .scaleEffect(x: axis?.scaleX ?? 1, y: axis?.scaleY ?? 1)
+    }
+}
+
+// MARK: - Floating window root
+
+/// Root view of the Floating window. The Mirror toggle and the drag bar sit
+/// outside FloatingOverlayView, so they fade here with the same timing as its
+/// content.
+struct FloatingPanelRoot: View {
+    @Bindable var speechRecognizer: SpeechRecognizer
+    let floatingView: FloatingOverlayView
+
+    @State private var controlsShown = false
+
+    /// Vertical and Both flip the control row to the top edge, so the drag
+    /// bar moves to the bottom edge.
+    private var dragBarAtBottom: Bool {
+        let settings = NotchSettings.shared
+        return settings.mirrorOverlay && settings.overlayMirrorAxis.scaleY < 0
+    }
+
+    var body: some View {
+        MirroredOverlay(showsControlWhenOff: false, controlVisible: controlsShown) {
+            floatingView
+        }
+        .overlay(alignment: dragBarAtBottom ? .bottom : .top) {
+            FloatingDragBar()
+                .opacity(controlsShown ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.3)) {
+                controlsShown = true
+            }
+        }
+        .onChange(of: speechRecognizer.shouldDismiss) { _, shouldDismiss in
+            if shouldDismiss {
+                withAnimation(.easeIn(duration: 0.25)) {
+                    controlsShown = false
+                }
             }
         }
     }
@@ -1794,8 +1849,7 @@ struct MirroredOverlay<Content: View>: View {
 /// the move itself with performDrag.
 struct FloatingDragBar: View {
     var body: some View {
-        // Centred and narrow, so it never covers the Mirror button at the
-        // top-right corner.
+        // Centred and narrow, so it stays clear of the corner controls.
         WindowDragArea()
             .frame(width: 120, height: 22)
             .overlay(

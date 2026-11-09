@@ -88,9 +88,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if TextreamService.shared.hasUnsavedChanges {
-            guard TextreamService.shared.confirmDiscardIfNeeded() else { return false }
-        }
+        guard TextreamService.shared.confirmCloseIfNeeded() else { return false }
         NSApp.terminate(nil)
         return false
     }
