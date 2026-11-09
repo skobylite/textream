@@ -514,6 +514,11 @@ struct Prompter {
     /// fixed only: false drops the check for a quick glide that is still
     /// too fast after the settle time (for the bug checks).
     var guards = true
+    /// fixed only: false drops the aim of the base at the start of the
+    /// glide back (for the bug checks). reaimsBack false lets that aim skip
+    /// a short move back.
+    var reaims = true
+    var reaimsBack = true
     /// The response of the reading spring (other values for the sweep).
     var readingResponse = Scroll.readingSpringResponse
 
@@ -544,8 +549,9 @@ struct Prompter {
 
     /// recalculateTracking and applyTrackingTarget: the highlight moved to
     /// `progress`. `force` is a tap on this screen (repositionTracking).
+    /// `allowsBack` is the one-time backward allowance.
     mutating func follow(_ progress: Double, force: Bool = false, step: Scroll.TrackingStep = .reading,
-                         at time: Double) {
+                         allowsBack: Bool = false, at time: Double) {
         let words = progress - tracked
         let deliberate = force || progress < tracked
         tracked = progress
@@ -558,7 +564,7 @@ struct Prompter {
                 && Scroll.quickGlideTooFast(left: CGFloat(left), step: CGFloat(abs(to - base)))
             let move = Scroll.trackingMove(
                 from: CGFloat(base), to: CGFloat(to), step: step, words: words, deliberate: deliberate,
-                allowsBack: false, settling: settles && (time - lastQuick < Scroll.quickGlideSettle || tooFast),
+                allowsBack: allowsBack, settling: settles && (time - lastQuick < Scroll.quickGlideSettle || tooFast),
                 regressionThreshold: CGFloat(regression), jumpLimit: 400, smoothScroll: false)
             switch move {
             case .skip: break
@@ -605,10 +611,16 @@ struct Prompter {
     }
 
     /// The glide back at the end of a look-around (glideBackToTrackedLine).
+    /// It first aims the base at the tracked line, with the text still.
     mutating func glideBack(at time: Double) {
+        if design == .fixed && reaims {
+            follow(tracked, step: .still, allowsBack: reaimsBack, at: time)
+        }
         guard peek != 0 else { return }
+        // A glide of more than 400 pt jumps (only the lines near the end are rendered).
+        let glide: Request = abs(peek) <= 400 ? .curve(.easeInOut, duration: 0.4) : .snap
         peek = 0
-        shown.set(base, .curve(.easeInOut, duration: 0.4), at: time)
+        shown.set(base, glide, at: time)
         if design == .fixed && settles { lastQuick = time }
     }
 }
@@ -1137,6 +1149,87 @@ check("the bug: without the hold, the first scroll step ends the running glide i
 check("the bug (3404937): a far move of the highlight during a look-around jumped the text by more than 400 pt and back",
       before.duringResults > 400)
 
+// MARK: 5b. A look-around that starts during a glide ends on the tracked line
+
+/// A silent look-around on this screen: `scrolls` are scroll events (time,
+/// delta), and the glide back comes 6 s after the last scroll event before
+/// it, as the timer does. Gives the distance between the text and the
+/// tracked line (the target of the highlight) 2 s after the last glide back.
+func restAfterLookAround(_ updates: [Update], scrolls: [(time: Double, delta: Double)],
+                         setUp: (inout Prompter) -> Void = { _ in }) -> Double {
+    var view = Prompter(.fixed, fiveWords, readLine: floatingLine)
+    setUp(&view)
+    var next = 0
+    var lastScroll = -Double.infinity, glidedAfter = -Double.infinity
+    var rest = 0.0
+    run(updates, &view, until: scrolls.last!.time + 8, events: { time, view in
+        while next < scrolls.count, scrolls[next].time <= time {
+            view.scroll(by: scrolls[next].delta, holds: true, at: time)
+            lastScroll = time
+            next += 1
+        }
+        if time >= lastScroll + 6, glidedAfter != lastScroll {
+            glidedAfter = lastScroll
+            view.glideBack(at: time)
+        }
+    }) { time, view, progress in
+        rest = view.shown.shown(at: time) - view.target(progress)
+    }
+    return rest
+}
+func noReaim(_ view: inout Prompter) { view.reaims = false }
+// Reading stops at 20 s. A 300 pt look-around at 25 s glides back at 31 s,
+// and a 10 pt scroll comes `delay` s into that glide back.
+let silent = steadyReading(end: 20)
+func intoGlideBack(_ delay: Double) -> [(time: Double, delta: Double)] {
+    Array(repeating: (25.0, 10.0), count: 30) + [(31 + delay, 10)]
+}
+let intoDelays = [0.05, 0.1, 0.2]
+let intoNow = intoDelays.map { restAfterLookAround(silent, scrolls: intoGlideBack($0)) }
+let intoOld = intoDelays.map { restAfterLookAround(silent, scrolls: intoGlideBack($0), setUp: noReaim) }
+info("a scroll 0.05, 0.1 or 0.2 s into a glide back: the text rests \(intoNow.map { f1($0) }.joined(separator: ", ")) pt from the tracked line (f68075d \(intoOld.map { f1($0) }.joined(separator: ", ")))")
+check("a silent look-around that starts 0.05, 0.1 or 0.2 s into the glide back of an earlier one ends within 1 pt of the tracked line",
+      intoNow.allSatisfy { abs($0) <= 1 })
+check("the bug (f68075d): it ended up to \(f1(intoOld.map(abs).max()!)) pt from the tracked line, so the next word was off screen",
+      intoOld.allSatisfy { abs($0) > 100 })
+// A tap 40 words back at 20.33 s (a quick glide of 256 pt), then silence,
+// and a 10 pt scroll `delay` s after the tap.
+var tapBack = steadyReading(end: 20.33)
+tapBack.append(Update(time: 20.33, progress: tapBack.last!.progress - 40, kind: .tap))
+let tapNow = [0.1, 0.35].map { restAfterLookAround(tapBack, scrolls: [(20.33 + $0, 10)]) }
+let tapOld = [0.1, 0.35].map { restAfterLookAround(tapBack, scrolls: [(20.33 + $0, 10)], setUp: noReaim) }
+let tapNoBack = restAfterLookAround(tapBack, scrolls: [(20.68, 10)]) { $0.reaimsBack = false }
+info("a scroll 0.1 or 0.35 s after a tap 40 words back: the text rests \(tapNow.map { f1($0) }.joined(separator: ", ")) pt from the tracked line (f68075d \(tapOld.map { f1($0) }.joined(separator: ", ")))")
+check("a silent look-around that starts 0.1 or 0.35 s after a tap 40 words back ends within 1 pt of the tracked line",
+      tapNow.allSatisfy { abs($0) <= 1 })
+check("the bug (f68075d): it ended \(f1(abs(tapOld[0]))) and \(f1(abs(tapOld[1]))) pt from the tracked line", tapOld.allSatisfy { abs($0) > 10 })
+check("without the one-time backward allowance, the base skips the short move back and the text rests \(f1(abs(tapNoBack))) pt from the line",
+      abs(tapNoBack) > 10)
+// A catch-up of 10 words after a 2 s hold, then silence. 0.1 s after it
+// the user scrolls 10 pt down and, 0.05 s later, 10 pt up: the peek offset
+// is 0 again when the glide back comes.
+let heldThenSilent = steadyReading(end: 23, hold: (20, 22))
+let caughtUp = heldThenSilent.last!.time
+let downUp = [(time: caughtUp + 0.1, delta: 10.0), (caughtUp + 0.15, -10)]
+let downUpNow = restAfterLookAround(heldThenSilent, scrolls: downUp)
+let downUpOld = restAfterLookAround(heldThenSilent, scrolls: downUp, setUp: noReaim)
+check("a scroll down and back up during a catch-up glide, then silence: the text ends within 1 pt of the tracked line",
+      abs(downUpNow) <= 1)
+check("the bug (f68075d): the peek offset was 0, so the glide back did nothing and the text stayed \(f1(abs(downUpOld))) pt away",
+      abs(downUpOld) > 10)
+// The most common case: a 10 pt scroll 0.2 s after a normal result, while
+// the reading spring runs, then silence.
+let lastResult = silent.last!.time
+let afterResultNow = restAfterLookAround(silent, scrolls: [(lastResult + 0.2, 10)])
+let afterResultOld = restAfterLookAround(silent, scrolls: [(lastResult + 0.2, 10)], setUp: noReaim)
+check("a 10 pt scroll 0.2 s after a normal result, then silence: the text ends within 1 pt of the tracked line",
+      abs(afterResultNow) <= 1)
+check("the bug (f68075d): it stayed \(f1(abs(afterResultOld))) pt (\(f2(abs(afterResultOld) / 32)) line) behind",
+      abs(afterResultOld) > 10)
+// A look-around at rest: the aim changes nothing.
+let atRest = restAfterLookAround(silent, scrolls: Array(repeating: (30.0, 10.0), count: 6))
+check("a look-around of text at rest still glides back onto the tracked line", abs(atRest) <= 0.01)
+
 // MARK: 6. Every screen reads and follows a look-around with the same map
 
 /// The follower's peek offset for shared progress `shared`, as
@@ -1307,6 +1400,9 @@ check("ShownOffsetEffect writes the offset that it shows",
 check("a glide back starts the settle time",
       has("private func glideBackToTrackedLine() {", "private func holdTextWhereShown() {",
           "withTransaction(transaction) { manualOffset = 0 } lastQuickGlide = ProcessInfo.processInfo.systemUptime }"))
+check("a glide back first aims the base at the tracked line, also back, in one transaction with animations off, and the peek offset takes up the move",
+      has("private func glideBackToTrackedLine() {", "private func holdTextWhereShown() {",
+          "isFollowingPeek = false var still = Transaction() still.disablesAnimations = true withTransaction(still) { let baseBefore = scrollOffset allowsNextBackwardTrackingUpdate = true recalculateTracking(containerHeight: containerHeight, step: .still) manualOffset -= scrollOffset - baseBefore } guard manualOffset != 0 else { return }"))
 check("Word Tracking keeps the word only for a nudge",
       has("private func scrollKeepsCurrentWord() -> Bool {", "static func trackingScrollKeepsWord(",
           "if !smoothScroll, layoutWidth > 0 { return Self.trackingScrollKeepsWord(manualOffset: manualOffset, minimumMove: minimumPeekOffset) }"))

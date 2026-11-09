@@ -655,6 +655,19 @@ struct SpeechScrollView: View {
     /// Word tracking: end a look-around. Glide back to the tracked line.
     private func glideBackToTrackedLine() {
         isFollowingPeek = false
+        // A look-around that starts during a glide holds the base where
+        // the text was (holdTextWhereShown). Aim the base at the tracked
+        // line again, also back, with the text still: the peek offset takes
+        // up the move. So the glide below ends on the tracked line, also
+        // when the peek offset is 0 now.
+        var still = Transaction()
+        still.disablesAnimations = true
+        withTransaction(still) {
+            let baseBefore = scrollOffset
+            allowsNextBackwardTrackingUpdate = true
+            recalculateTracking(containerHeight: containerHeight, step: .still)
+            manualOffset -= scrollOffset - baseBefore
+        }
         guard manualOffset != 0 else { return }
         // Only the lines near the tracked line are rendered at the end, so
         // a longer glide would pass through empty space. Jump instead.
