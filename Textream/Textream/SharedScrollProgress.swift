@@ -4,7 +4,9 @@
 //
 //  One reading position for every Mac prompter screen in Classic and
 //  Voice-Activated mode. The session overlay and the External display read
-//  and write the same object, so they show the same word.
+//  and write the same object, so they show the same word. It also holds the
+//  look-around scroll of one screen in every listening mode, so the other
+//  screens scroll with it.
 //
 
 import Foundation
@@ -84,7 +86,8 @@ enum ScrollProgressMath {
     }
 }
 
-/// The Classic and Voice-Activated reading position of the current session.
+/// The Classic and Voice-Activated reading position of the current session,
+/// and the look-around scroll (`peek`) in every listening mode.
 /// NotchOverlayController owns it; every prompter screen of the session
 /// reads it.
 ///

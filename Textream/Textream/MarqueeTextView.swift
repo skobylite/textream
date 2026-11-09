@@ -856,7 +856,8 @@ struct SpeechScrollView: View {
         let center = containerHeight * 0.5
 
         if smoothScroll {
-            // Classic/silence-paused: anchor active word near the bottom, scrolling up.
+            // Classic/silence-paused: keep the active word on the reading line
+            // (0.8h, see smoothReadingAnchor), scrolling up.
             // The line layout gives the word also when its line is culled.
             guard let interpolatedY = layoutY(forWordProgress: smoothWordProgress) else { return }
             applyTrackingTarget(

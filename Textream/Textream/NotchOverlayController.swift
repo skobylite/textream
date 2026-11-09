@@ -65,8 +65,9 @@ class NotchOverlayController: NSObject {
     private let screenEdgeMargin: CGFloat = 5
     private var panel: NSPanel?
     let speechRecognizer = SpeechRecognizer()
-    /// The Classic and Voice-Activated reading position, shared by every
-    /// prompter screen of the session (overlay and External display).
+    /// The Classic and Voice-Activated reading position and the look-around
+    /// scroll, shared by every prompter screen of the session (overlay and
+    /// External display).
     let scrollProgress = SharedScrollProgress()
     let overlayContent = OverlayContent()
     var onComplete: (() -> Void)?
