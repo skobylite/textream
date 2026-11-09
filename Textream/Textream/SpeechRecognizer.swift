@@ -1157,9 +1157,9 @@ class SpeechRecognizer {
     /// Short forms that are read in full ("i.e." as "that is", "DFY" as
     /// "done for you"). A plural short form ("KPIs") is its words with "s".
     static let spokenExpansions: [String: Set<String>] = ["ie": ["that is"], "eg": ["for example", "for instance"], "etc": ["et cetera", "and so on"], "vs": ["versus"], "dr": ["doctor"], "mr": ["mister"], "mrs": ["missus", "misses"], "aka": ["also known as"], "diy": ["do it yourself"], "fyi": ["for your information"], "dfy": ["done for you"], "dwy": ["done with you"], "cta": ["call to action"], "ctas": ["calls to action"], "va": ["virtual assistant"], "roi": ["return on investment"], "sop": ["standard operating procedure"], "kpi": ["key performance indicator"]]
-    /// Scale words said after digits for a short scale letter ("$2M" heard
-    /// as "$2 million").
-    static let scaleLetters: [String: String] = ["thousand": "k", "million": "m", "billion": "b"]
+    /// Words said after digits for a short letter ("$2M" heard as "$2
+    /// million", "$10k" as "10 grand", "10x" as "10 times").
+    static let scaleLetters: [String: String] = ["thousand": "k", "million": "m", "billion": "b", "grand": "k", "times": "x"]
     /// The ends of contractions (letters only) and the words they stand for.
     static let contractionEnds: [String: Set<String>] = ["m": ["am"], "s": ["is", "has", "us"], "ve": ["have"], "re": ["are"], "ll": ["will"], "d": ["would", "had"], "t": ["not"], "nt": ["not"]]
 
@@ -1167,7 +1167,8 @@ class SpeechRecognizer {
     /// joined they are the script word ("c r m" for "CRM", "step by step" for
     /// "step-by-step"), or they are a contraction said in full ("i am" for
     /// "I'm", "do not" for "don't"), or a range ("3 to 5" for "3-5"), or a
-    /// short form read in full, or digits and a scale word ("2 million" for "2M").
+    /// short form read in full, or digits and a scale word ("2 million" for
+    /// "2M", "3 times" for "3x").
     static func isSpokenForm(_ script: String, _ words: ArraySlice<String>) -> Bool {
         let said = words.joined(separator: " ")
         if spokenExpansions[script]?.contains(said) == true { return true }
@@ -1187,13 +1188,21 @@ class SpeechRecognizer {
 
     /// A range said with "to" ("3 to 5", "three to five") as the script word
     /// of a range in digits ("3-5" is "35" as letters and digits), or its
-    /// start ("3 to" is "3").
+    /// start ("3 to" is "3"). The end can carry a unit: "3 to 5k", "4 to 6
+    /// pm", "2 to 3 times" are "35k", "46pm", "23x" (see `scaleLetters`).
     static func rangeDigits(_ words: ArraySlice<String>) -> String? {
         func digits(_ w: String) -> String? { w.allSatisfy(\.isNumber) ? w : numberValue(w).map { String($0) } }
-        guard (2...3).contains(words.count), words[words.startIndex + 1] == "to",
-              let a = digits(words.first!) else { return nil }
-        guard words.count == 3 else { return a }
-        return digits(words.last!).map { a + $0 }
+        let s = words.startIndex
+        guard (2...4).contains(words.count), words[s + 1] == "to", let a = digits(words[s]) else { return nil }
+        guard words.count > 2 else { return a }
+        let end = words[s + 2]
+        if words.count == 4 {
+            guard let b = digits(end), words[s + 3].allSatisfy(\.isLetter) else { return nil }
+            return a + b + (scaleLetters[words[s + 3]] ?? words[s + 3])
+        }
+        if let b = digits(end) { return a + b }
+        let b = end.prefix { $0.isNumber } // "5k"
+        return !b.isEmpty && end.dropFirst(b.count).allSatisfy(\.isLetter) ? a + end : nil
     }
 
     /// `spoken` with each 2 or 3 words in a row that say one word of `script`
@@ -1207,17 +1216,34 @@ class SpeechRecognizer {
             var joined: (word: String, count: Int)?
             // A number said in words ("two thousand five hundred dollars") for a
             // script number in digits ("$2,500"): the whole run of number words.
-            if isNumberWord(spoken[i]), !numberUnits.contains(spoken[i]), let start = numberStart(spoken[i...]),
-               let w = script.first(where: { hasDigit($0) && $0.filter(\.isNumber).hasPrefix(start) }) {
+            // "a" before a scale word is one ("a million", "a hundred bucks").
+            let one = spoken[i] == "a" && i + 1 < spoken.count && ["hundred", "thousand", "million"].contains(spoken[i + 1])
+            if one || (isNumberWord(spoken[i]) && !numberUnits.contains(spoken[i])),
+               let start = one ? "1" : numberStart(spoken[i...]),
+               case let fits = script.filter({ hasDigit($0) && $0.filter(\.isNumber).hasPrefix(start) }), !fits.isEmpty {
                 var run = 1
                 while i + run < spoken.count {
-                    // "and" inside a number ("four hundred and ninety seven").
+                    // "and" inside a number ("four hundred and ninety seven",
+                    // "two and a half million").
+                    let half = spoken[i + run] == "and" && i + run + 2 < spoken.count
+                        && spoken[i + run + 1] == "a" && spoken[i + run + 2] == "half"
                     let and = spoken[i + run] == "and" && ["hundred", "thousand", "million"].contains(spoken[i + run - 1])
                         && i + run + 1 < spoken.count && numberValue(spoken[i + run + 1]) != nil
-                    guard isNumberWord(spoken[i + run]) || and else { break }
-                    run += and ? 2 : 1
+                    guard isNumberWord(spoken[i + run]) || and || half else { break }
+                    run += half ? 3 : and ? 2 : 1
                 }
-                if run >= 2 { joined = (w, run) }
+                // Of several script numbers that start with these digits, the one
+                // with the scale letter said wins ("one million" is "1m", not "10k").
+                // "a" only stands for that one or a plain number ("a hundred" is
+                // "100", not "1m").
+                let unit = spoken[i..<(i + run)].compactMap { scaleLetters[$0] }.last ?? ""
+                let w = fits.first { $0.drop(while: \.isNumber) == unit }
+                    ?? (one ? fits.first { $0.allSatisfy(\.isNumber) } : fits[0])
+                if run >= 2, let w { joined = (w, run) }
+            }
+            // A range with a unit word ("4 to 6 pm" for "4-6pm", "3 to 5 grand" for "$3-5k").
+            if joined == nil, i + 4 <= spoken.count, let r = rangeDigits(spoken[i..<(i + 4)]), script.contains(r) {
+                joined = (r, 4)
             }
             for k in stride(from: spokenFormMaxWords, through: 1, by: -1) where joined == nil && i + k <= spoken.count {
                 let group = spoken[i..<(i + k)]
@@ -1225,10 +1251,11 @@ class SpeechRecognizer {
                 // "everyday") stay as they are.
                 if k >= 2, hasRun(script, group) { continue }
                 let atEnd = partialEnd && k >= 2 && i + k == spoken.count
-                let rangeStart = atEnd && k == 2 ? rangeDigits(group) : nil
+                // The start of a range ("3 to", "4 to 6" while the reader says "4 to 6 pm").
+                let rangeStart = atEnd ? rangeDigits(group) : nil
                 if let w = script.first(where: { s in isSpokenForm(s, group)
                     || (atEnd && s.count > group.joined().count && s.hasPrefix(group.joined()))
-                    || (rangeStart.map { s.count > $0.count && s.hasPrefix($0) && s.allSatisfy(\.isNumber) } ?? false) }) {
+                    || (rangeStart.map { s.count > $0.count && s.hasPrefix($0) && s.drop(while: \.isNumber).allSatisfy(\.isLetter) } ?? false) }) {
                     joined = (w, k)
                     break
                 }

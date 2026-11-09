@@ -304,6 +304,51 @@ check("support: 'virtual assistant on the' moves on to 'the'",
 check("an ad-lib with 'done for you' words is still off script",
       offScript(offer, held: startOf("DFY", in: offer), "i have done this for years now"))
 
+check("isSpokenForm: 'done with you', 'calls to action', 'return on investment', 'standard operating procedure'",
+      SR.isSpokenForm("dwy", said("done with you")[...]) && SR.isSpokenForm("ctas", said("calls to action")[...])
+      && SR.isSpokenForm("roi", said("return on investment")[...]) && SR.isSpokenForm("sop", said("standard operating procedure")[...]))
+
+// Number short forms with a letter read in another form (r4: "10 times" for
+// "10x", "10 grand" for "$10k", "3 to 5K" for "$3-5k", "a million" for "$1M").
+check("isSpokenForm: '3 times' for '3x', '10 grand' for '10k'",
+      SR.isSpokenForm("3x", said("3 times")[...]) && SR.isSpokenForm("10k", said("10 grand")[...]))
+check("isSpokenForm: '3 times' is not '4x', '10 grand' is not '10m'",
+      !SR.isSpokenForm("4x", said("3 times")[...]) && !SR.isSpokenForm("10m", said("10 grand")[...]))
+check("rangeDigits: the end carries the unit ('3 to 5k', '4 to 6 pm', '2 to 3 times', 'three to five k')",
+      SR.rangeDigits(said("3 to 5K")[...]) == "35k" && SR.rangeDigits(said("4 to 6 PM")[...]) == "46pm"
+      && SR.rangeDigits(said("2 to 3 times")[...]) == "23x" && SR.rangeDigits(said("three to five K")[...]) == "35k")
+let coach = "Most of my clients hit $10k months, charge $3-5k per client, get a 10x return, cross $1M by year two, and join our calls from 4-6pm every week. Some hit $2.5M later on, and the course is $100 a month."
+check("'10 times' read for '10x' is not off script", !offScript(coach, held: startOf("10x", in: coach), "get a 10 times return"))
+check("'10 grand' read for '$10k' is not off script", !offScript(coach, held: startOf("$10k", in: coach), "clients hit 10 grand months"))
+check("'3 to 5K' read for '$3-5k' is not off script", !offScript(coach, held: startOf("$3-5k", in: coach), "charge 3 to 5K per client"))
+check("'three to five K' read for '$3-5k' is not off script",
+      !offScript(coach, held: startOf("$3-5k", in: coach), "charge three to five K per"))
+check("'4 to 6 PM' read for '4-6pm' is not off script", !offScript(coach, held: startOf("4-6pm", in: coach), "calls from 4 to 6 PM every"))
+check("'4 to 6' as the newest words (the reader says '4 to 6 PM') is not off script",
+      !offScript(coach, held: startOf("4-6pm", in: coach), "our calls from 4 to 6"))
+check("'3 to' as the newest words joins the start of '35k' (the reader says '3 to 5K')",
+      SR.joinSpokenForms(said("charge 3 to"), script: ["charge", "35k", "per"], partialEnd: true) == ["charge", "35k"])
+check("'a million dollars' read for '$1M' is not off script",
+      !offScript(coach, held: startOf("$1M", in: coach), "cross a million dollars by"))
+check("'a hundred bucks' read for '$100' is not off script",
+      !offScript(coach, held: startOf("$100", in: coach), "course is a hundred bucks"))
+check("'two and a half million' read for '$2.5M' is not off script",
+      !offScript(coach, held: startOf("$2.5M", in: coach), "some hit two and a half million later"))
+check("a number said in words joins the script number with its scale letter ('one million' is '1m', not '10k')",
+      SR.joinSpokenForms(said("one million"), script: ["10k", "10x", "1m"]) == ["1m"])
+check("'a hundred' joins '100', not '1m', and not '1m' alone",
+      SR.joinSpokenForms(said("a hundred"), script: ["1m", "100"]) == ["100"]
+      && SR.joinSpokenForms(said("a hundred"), script: ["1m"]) == ["a", "hundred"])
+check("support: 'a 10 times return' moves on to 'return'",
+      SR.supportEnd(source: coach, spoken: said("a 10 times return"), current: startOf("10x", in: coach),
+                    candidate: startOf("10x", in: coach), matches: eq)?.end == endOf("10x return,", in: coach))
+check("an ad-lib with '10 grand' in it is still off script",
+      offScript(coach, held: startOf("$10k", in: coach), "we did 10 grand last month which was insane"))
+check("an ad-lib with 'a hundred' in it is still off script",
+      offScript(coach, held: startOf("$1M", in: coach), "a hundred people came to the last one"))
+check("an ad-lib with another range is still off script",
+      offScript(coach, held: startOf("$3-5k", in: coach), "we did 3 to 5 calls a day back then"))
+
 // Helpers.
 check("inOrderHits counts the longest in-order match", SR.inOrderHits(said("a x b c"), said("a b c d"), matches: eq) == 3)
 check("inOrderLast gives the last matched script word", SR.inOrderLast(said("in the it one"), said("in the next one"), matches: eq)?.last == 3)
