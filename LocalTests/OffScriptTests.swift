@@ -348,6 +348,16 @@ check("an ad-lib with 'a hundred' in it is still off script",
       offScript(coach, held: startOf("$1M", in: coach), "a hundred people came to the last one"))
 check("an ad-lib with another range is still off script",
       offScript(coach, held: startOf("$3-5k", in: coach), "we did 3 to 5 calls a day back then"))
+// A range with a unit read without the unit (r4 round 2: "four to six" for
+// "4-6pm" fitted only as the newest words, then counted as 3 misses).
+check("a range read without its unit joins the script range ('3 to 5' for '35k', 'two to three' for '23x')",
+      SR.joinSpokenForms(said("charge 3 to 5 per"), script: ["charge", "35k", "per"]) == ["charge", "35k", "per"]
+      && SR.joinSpokenForms(said("two to three what"), script: ["charge", "23x", "what"]) == ["23x", "what"])
+let tuesdays = "Join our group calls from 4-6pm on Tuesdays and bring one question each week."
+check("'from four to six on Tuesdays' read for 'from 4-6pm on Tuesdays' is not off script",
+      !offScript(tuesdays, held: startOf("4-6pm", in: tuesdays), "from four to six on tuesdays"))
+check("'three to five per client' read for '$3-5k per client' is not off script",
+      !offScript(coach, held: startOf("$3-5k", in: coach), "charge three to five per client"))
 
 // A number said in words joins the script number with its value (r4 round 1:
 // "two thousand five hundred" took the "k" of "thousand" and joined "$20k").

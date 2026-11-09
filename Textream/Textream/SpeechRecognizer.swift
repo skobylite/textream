@@ -1281,9 +1281,12 @@ class SpeechRecognizer {
                 let atEnd = partialEnd && k >= 2 && i + k == spoken.count
                 // The start of a range ("3 to", "4 to 6" while the reader says "4 to 6 pm").
                 let rangeStart = atEnd ? rangeDigits(group) : nil
+                // A range read without its unit ("4 to 6" for "4-6pm", "3 to 5" for "$3-5k").
+                let rangeNoUnit = k == 3 && !atEnd ? rangeDigits(group) : nil
                 if let w = script.first(where: { s in isSpokenForm(s, group)
                     || (atEnd && s.count > group.joined().count && s.hasPrefix(group.joined()))
-                    || (rangeStart.map { s.count > $0.count && s.hasPrefix($0) && s.drop(while: \.isNumber).allSatisfy(\.isLetter) } ?? false) }) {
+                    || (rangeStart.map { s.count > $0.count && s.hasPrefix($0) && s.drop(while: \.isNumber).allSatisfy(\.isLetter) } ?? false)
+                    || (rangeNoUnit.map { s.count > $0.count && s.hasPrefix($0) && s.dropFirst($0.count).allSatisfy(\.isLetter) } ?? false) }) {
                     joined = (w, k)
                     break
                 }
