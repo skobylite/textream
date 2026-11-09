@@ -78,7 +78,8 @@ class TextreamService: NSObject, ObservableObject {
                 speechRecognizer: overlayController.speechRecognizer,
                 words: words,
                 totalCharCount: totalCharCount,
-                hasNextPage: hasNextPage
+                hasNextPage: hasNextPage,
+                scrollProgress: overlayController.scrollProgress
             )
         }
     }
@@ -636,7 +637,8 @@ class TextreamService: NSObject, ObservableObject {
                 speechRecognizer: overlayController.speechRecognizer,
                 words: words,
                 totalCharCount: totalCharCount,
-                hasNextPage: false
+                hasNextPage: false,
+                scrollProgress: overlayController.scrollProgress
             )
         }
     }

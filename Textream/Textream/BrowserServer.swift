@@ -39,7 +39,9 @@ class BrowserServer {
     private var totalCharCount: Int = 0
     private var hasNextPage: Bool = false
     private weak var speechRecognizer: SpeechRecognizer?
-    private var timerWordProgress: Double = 0
+    /// The Mac's shared Classic/Voice-Activated reading position. The page
+    /// only reads it; the session overlay is the only screen that advances it.
+    private weak var scrollProgress: SharedScrollProgress?
     private var contentActive: Bool = false
 
     var httpPort: UInt16 { NotchSettings.shared.browserServerPort }
@@ -71,12 +73,12 @@ class BrowserServer {
 
     // MARK: - Content Management
 
-    func showContent(speechRecognizer: SpeechRecognizer, words: [String], totalCharCount: Int, hasNextPage: Bool) {
+    func showContent(speechRecognizer: SpeechRecognizer, words: [String], totalCharCount: Int, hasNextPage: Bool, scrollProgress: SharedScrollProgress) {
         self.speechRecognizer = speechRecognizer
+        self.scrollProgress = scrollProgress
         self.words = words
         self.totalCharCount = totalCharCount
         self.hasNextPage = hasNextPage
-        self.timerWordProgress = 0
         self.contentActive = true
         startBroadcasting()
     }
@@ -85,7 +87,6 @@ class BrowserServer {
         self.words = words
         self.totalCharCount = totalCharCount
         self.hasNextPage = hasNextPage
-        self.timerWordProgress = 0
     }
 
     func hideContent() {
@@ -234,24 +235,8 @@ class BrowserServer {
     private func broadcastCurrentState() {
         guard contentActive, !wsConnections.isEmpty else { return }
 
-        let charCount: Int
         let mode = NotchSettings.shared.listeningMode
-        // Check if scroll already reached the end, to stop advancing the timer
-        let scrollDone = totalCharCount > 0 && charOffsetForWordProgress(timerWordProgress) >= totalCharCount
-        switch mode {
-        case .wordTracking:
-            charCount = speechRecognizer?.recognizedCharCount ?? 0
-        case .classic:
-            if !scrollDone {
-                timerWordProgress += NotchSettings.shared.scrollSpeed * 0.1
-            }
-            charCount = charOffsetForWordProgress(timerWordProgress)
-        case .silencePaused:
-            if !scrollDone && speechRecognizer?.isListening == true && (speechRecognizer?.isSpeaking ?? false) {
-                timerWordProgress += NotchSettings.shared.scrollSpeed * 0.1
-            }
-            charCount = charOffsetForWordProgress(timerWordProgress)
-        }
+        let charCount = currentCharCount()
 
         let effective = min(charCount, totalCharCount)
         let rawDone = totalCharCount > 0 && effective >= totalCharCount
@@ -306,17 +291,36 @@ class BrowserServer {
 
     // MARK: - Helpers
 
-    private func charOffsetForWordProgress(_ progress: Double) -> Int {
-        let wholeWord = Int(progress)
-        let frac = progress - Double(wholeWord)
-        var offset = 0
-        for i in 0..<min(wholeWord, words.count) {
-            offset += words[i].count + 1
-        }
-        if wholeWord < words.count {
-            offset += Int(Double(words[wholeWord].count) * frac)
-        }
-        return min(offset, totalCharCount)
+    /// The char count the next broadcast sends, from the stored session
+    /// state and the current listening mode. Internal so a test can call it.
+    func currentCharCount() -> Int {
+        Self.phoneCharCount(
+            isWordTracking: NotchSettings.shared.listeningMode == .wordTracking,
+            recognizedCharCount: speechRecognizer?.recognizedCharCount ?? 0,
+            sharedWordProgress: scrollProgress?.wordProgress ?? 0,
+            words: words,
+            totalCharCount: totalCharCount
+        )
+    }
+
+    /// The highlighted char count that the phone page shows. Word Tracking
+    /// follows the mic. Classic and Voice-Activated show the Mac's shared
+    /// reading position, so the page stops on Pause, follows taps and scrolls
+    /// on any Mac screen, and a phone that connects late opens on the
+    /// current word. The page has no clock of its own.
+    static func phoneCharCount(
+        isWordTracking: Bool,
+        recognizedCharCount: Int,
+        sharedWordProgress: Double,
+        words: [String],
+        totalCharCount: Int
+    ) -> Int {
+        if isWordTracking { return recognizedCharCount }
+        return ScrollProgressMath.charOffset(
+            forWordProgress: sharedWordProgress,
+            words: words,
+            totalCharCount: totalCharCount
+        )
     }
 
     static func localIPAddress() -> String? {
