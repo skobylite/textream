@@ -1213,9 +1213,11 @@ struct AboutView: View {
 
 /// Keeps the Remote Connection QR code on screen in the main window, so a phone
 /// can be pointed at it without opening Settings. Hidden when Remote is off.
+/// The chevron folds the code away; the URL stays, and the choice is kept.
 private struct RemoteQRPanel: View {
     @State private var localIP: String?
     @State private var qrImage: NSImage?
+    @AppStorage("remoteQRFolded") private var folded = false
 
     private var url: String? {
         guard NotchSettings.shared.browserServerEnabled, let ip = localIP else { return nil }
@@ -1230,7 +1232,7 @@ private struct RemoteQRPanel: View {
                 VStack(spacing: 6) {
                     Divider()
 
-                    if let qrImage {
+                    if let qrImage, !folded {
                         Image(nsImage: qrImage)
                             .interpolation(.none)
                             .resizable()
@@ -1240,18 +1242,33 @@ private struct RemoteQRPanel: View {
                             .padding(.top, 10)
                     }
 
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(url, forType: .string)
-                    } label: {
-                        Text(url)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    HStack(spacing: 4) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { folded.toggle() }
+                        } label: {
+                            Image(systemName: folded ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 12, height: 12)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(folded ? "Show the QR code" : "Hide the QR code")
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(url, forType: .string)
+                        } label: {
+                            Text(url)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy the remote URL")
                     }
-                    .buttonStyle(.plain)
-                    .help("Copy the remote URL")
+                    .padding(.top, folded ? 6 : 0)
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
