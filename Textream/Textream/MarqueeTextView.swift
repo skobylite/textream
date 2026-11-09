@@ -118,6 +118,38 @@ struct WordYPreferenceKey: PreferenceKey {
     }
 }
 
+// MARK: - Shown offset
+
+/// The offset that a prompter view shows now, also while SwiftUI animates
+/// it. ShownOffsetEffect writes it on each frame. A look-around reads it to
+/// stop a running glide where the text is.
+nonisolated final class ShownOffset: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shown: CGFloat?
+
+    var value: CGFloat? {
+        get { lock.withLock { shown } }
+        set { lock.withLock { shown = newValue } }
+    }
+}
+
+/// The y offset of .offset(y:), which also writes the offset that it shows
+/// to `shown`.
+struct ShownOffsetEffect: GeometryEffect {
+    var y: CGFloat
+    let shown: ShownOffset
+
+    var animatableData: CGFloat {
+        get { y }
+        set { y = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        shown.value = y
+        return ProjectionTransform(CGAffineTransform(translationX: 0, y: y))
+    }
+}
+
 // MARK: - Teleprompter
 
 struct SpeechScrollView: View {
@@ -170,6 +202,12 @@ struct SpeechScrollView: View {
     /// True while manualOffset shows a look-around scroll made on another
     /// screen.
     @State private var isFollowingPeek = false
+    /// The offset that the text shows now (scrollOffset + manualOffset as
+    /// SwiftUI animates it).
+    @State private var shownOffset = ShownOffset()
+    /// Word Tracking: the system uptime of the last quick glide (a tap, a
+    /// re-read, a catch-up or a glide back). See trackingMove.
+    @State private var lastQuickGlide: TimeInterval = -.infinity
 
     private var readingPositionTransitionAnimation: Animation? {
         guard let duration = readingPositionTransitionDuration, duration > 0 else {
@@ -199,7 +237,12 @@ struct SpeechScrollView: View {
                 paragraphBreakBeforeWordIndices: paragraphBreakBeforeWordIndices,
                 containerWidth: geo.size.width,
                 onWordTap: { charOffset in
-                    let tappedWordIndex = wordIndex(at: charOffset)
+                    // Word Tracking: the highlight lands past a [bracket]
+                    // annotation, so the scroll aims there too.
+                    let landing = smoothScroll
+                        ? charOffset
+                        : Self.tapLandingOffset(words: words, charOffset: charOffset)
+                    let tappedWordIndex = wordIndex(at: landing)
                     peekResetGeneration += 1
                     manualOffset = 0
                     // A tap ends the look-around on every screen.
@@ -210,13 +253,13 @@ struct SpeechScrollView: View {
                     }
                     // The tap moves the view below, so the highlight change
                     // that follows is not a move back to follow again.
-                    trackedCharCount = charOffset
+                    trackedCharCount = landing
                     onWordTap?(charOffset)
                     // Reposition from the tapped word itself instead of waiting
                     // for the parent progress update. That update can arrive
                     // after a stale recalculation has consumed the one-time
                     // backward allowance.
-                    repositionTracking(toWordIndex: tappedWordIndex)
+                    repositionTracking(toWordIndex: tappedWordIndex, charCount: landing)
                 },
                 scrollOffset: scrollOffset + manualOffset,
                 viewportHeight: geo.size.height
@@ -249,7 +292,7 @@ struct SpeechScrollView: View {
                     recalculateTracking(containerHeight: containerHeight)
                 }
             }
-            .offset(y: scrollOffset + manualOffset)
+            .modifier(ShownOffsetEffect(y: scrollOffset + manualOffset, shown: shownOffset))
             .animation(scrollOffsetAnimation, value: scrollOffset)
             .animation(.easeOut(duration: 0.15), value: manualOffset)
             .onChange(of: geo.size.width, initial: true) { _, newWidth in
@@ -271,15 +314,30 @@ struct SpeechScrollView: View {
                     // peek offset takes up the same distance, so the text
                     // stays still. The next word ends a nudge.
                     let isPeeking = abs(manualOffset) >= minimumPeekOffset
-                    if !isPeeking {
-                        manualOffset = 0
+                    // During a look-around on this screen or another one,
+                    // write the base and the peek offset in one transaction
+                    // with animations off. A write in a transaction of its
+                    // own moves the text, and then it glides back.
+                    let holdsStill = isPeeking
+                        || Self.peekOwner(source: sharedProgress?.peek?.source, this: peekSourceID) == .other
+                    let followReader = {
+                        if !isPeeking {
+                            manualOffset = 0
+                        }
+                        let baseBefore = scrollOffset
+                        recalculateTracking(containerHeight: containerHeight, step: holdsStill ? .still : .reading)
+                        if isPeeking {
+                            manualOffset -= scrollOffset - baseBefore
+                        }
+                        handlePeekEvent(.highlightMoved)
                     }
-                    let baseBefore = scrollOffset
-                    recalculateTracking(containerHeight: containerHeight)
-                    if isPeeking {
-                        manualOffset -= scrollOffset - baseBefore
+                    if holdsStill {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction, followReader)
+                    } else {
+                        followReader()
                     }
-                    handlePeekEvent(.highlightMoved)
                 } else if !smoothScroll {
                     // Paused word tracking: the highlight moves only on a
                     // deliberate event, such as a tap on another screen or a
@@ -414,6 +472,12 @@ struct SpeechScrollView: View {
                             // wheel sends no end phase, so the timer starts here.
                             peekResetGeneration += 1
                             if isListening {
+                                // A look-around starts where the text is. Else
+                                // its first step ends a running glide in 0.15 s,
+                                // and the text jumps on by the rest of the glide.
+                                if manualOffset == 0, delta != 0 {
+                                    holdTextWhereShown()
+                                }
                                 schedulePeekGlideBack()
                             }
                         }
@@ -587,6 +651,7 @@ struct SpeechScrollView: View {
     /// Word tracking: end a look-around. Glide back to the tracked line.
     private func glideBackToTrackedLine() {
         isFollowingPeek = false
+        guard manualOffset != 0 else { return }
         // Only the lines near the tracked line are rendered at the end, so
         // a longer glide would pass through empty space. Jump instead.
         let glide: Animation? = abs(manualOffset) <= wordFlowCullingBuffer
@@ -597,6 +662,26 @@ struct SpeechScrollView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             manualOffset = 0
+        }
+        // A reading step during the glide back must not slow it down.
+        lastQuickGlide = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Live Word Tracking: stop a running glide where the text is now. A
+    /// write with animations off ends the glide, and this one keeps the text
+    /// where it is. The next tracking target moves the text on from there.
+    /// A glide never has more than wordFlowCullingBuffer to go (a longer
+    /// move jumps), so a larger gap is a jump that the shown offset does not
+    /// show yet.
+    private func holdTextWhereShown() {
+        guard let shown = shownOffset.value else { return }
+        let base = shown - manualOffset
+        let gap = abs(base - scrollOffset)
+        guard gap > 0.5, gap <= wordFlowCullingBuffer else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollOffset = base
         }
     }
 
@@ -611,17 +696,27 @@ struct SpeechScrollView: View {
 
     /// The word that tracking puts at the reading line.
     private var currentScrollWord: Double {
-        smoothScroll ? smoothWordProgress : Double(activeWordIndex())
+        smoothScroll ? smoothWordProgress : trackingProgress
     }
 
     private func scrollKeepsCurrentWord() -> Bool {
-        Self.smoothReleaseKeepsWord(
+        if !smoothScroll, layoutWidth > 0 {
+            return Self.trackingScrollKeepsWord(manualOffset: manualOffset, minimumMove: minimumPeekOffset)
+        }
+        return Self.smoothReleaseKeepsWord(
             manualOffset: manualOffset,
             minimumMove: minimumPeekOffset,
             readY: releaseReadLineY() - (scrollOffset + manualOffset),
             wordY: layoutY(forWordProgress: currentScrollWord),
             rowAdvance: WordFlowLayout.rowHeight(for: font) + WordFlowLayout.lineSpacing(for: font)
         )
+    }
+
+    /// Word Tracking: true when a scroll keeps the current word progress.
+    /// slidProgress gives each height its own progress, so only a nudge (a
+    /// trackpad touch that moves the text less than `minimumMove`) keeps it.
+    static func trackingScrollKeepsWord(manualOffset: CGFloat, minimumMove: CGFloat) -> Bool {
+        abs(manualOffset) < minimumMove
     }
 
     /// This screen was scrolled: share the word at its reading line.
@@ -647,7 +742,7 @@ struct SpeechScrollView: View {
     /// bounds. The bounds come from the line layout, so a culled line does
     /// not limit a long move.
     private func applyFollowerPeek(_ peek: SharedScrollProgress.Peek) {
-        guard let wordY = layoutY(forWordProgress: peek.wordProgress) else { return }
+        guard let wordY = readingY(forProgress: peek.wordProgress) else { return }
         let bounds = Self.manualOffsetBounds(
             scrollOffset: scrollOffset,
             topOffset: initialScrollOffset(containerHeight: containerHeight),
@@ -841,15 +936,19 @@ struct SpeechScrollView: View {
         }
     }
 
-    private func recalculateTracking(containerHeight: CGFloat) {
+    /// `step` tells Word Tracking what moved the target, which picks its
+    /// animation (see trackingMove).
+    private func recalculateTracking(containerHeight: CGFloat, step: TrackingStep = .other) {
         // The highlight moves back only on deliberate events: a confirmed
         // re-read, a tap in another view, a new session or a text edit. The
         // view follows such a move, however short it is.
         let highlightMovedBack = highlightedCharCount < trackedCharCount
+        // Word Tracking: the words that this step adds (see trackingMove).
+        let words = smoothScroll ? 0 : trackingProgress - trackingProgress(atCharCount: trackedCharCount)
         trackedCharCount = highlightedCharCount
 
         if readingPosition == .nearTop {
-            recalcTopWithPreviousLine(highlightMovedBack: highlightMovedBack)
+            recalcTopWithPreviousLine(highlightMovedBack: highlightMovedBack, step: step, words: words)
             return
         }
 
@@ -869,23 +968,70 @@ struct SpeechScrollView: View {
                 followsBack: highlightMovedBack
             )
         } else {
-            // Word-tracking/voice-activated: active word at vertical center
-            if let wordY = trackingWordY(activeWordIndex()) {
-                applyTrackingTarget(center - wordY, followsBack: highlightMovedBack)
+            // Word tracking: the reading Y slides along the line of the
+            // active word, and it sits at the vertical center.
+            if let wordY = readingY(forProgress: trackingProgress) {
+                applyTrackingTarget(
+                    Self.wordTrackingTarget(lineY: wordY, readingLineY: center, nearTop: false),
+                    followsBack: highlightMovedBack,
+                    step: step,
+                    words: words
+                )
             }
         }
     }
 
-    private func recalcTopWithPreviousLine(highlightMovedBack: Bool) {
+    private func recalcTopWithPreviousLine(highlightMovedBack: Bool, step: TrackingStep, words: Double) {
         if smoothScroll {
             guard let interpolatedY = layoutY(forWordProgress: smoothWordProgress) else { return }
             let target = min(interpolatedY, topReadingAnchor) - interpolatedY
             applyTrackingTarget(target, followsBack: highlightMovedBack)
         } else {
-            guard let wordY = trackingWordY(activeWordIndex()) else { return }
-            let target = min(wordY, topReadingAnchor) - wordY
-            applyTrackingTarget(target, followsBack: highlightMovedBack)
+            guard let wordY = readingY(forProgress: trackingProgress) else { return }
+            applyTrackingTarget(
+                Self.wordTrackingTarget(lineY: wordY, readingLineY: topReadingAnchor, nearTop: true),
+                followsBack: highlightMovedBack,
+                step: step,
+                words: words
+            )
         }
+    }
+
+    /// Word Tracking: the words read so far, from the highlight (3.5 is
+    /// half of word 3). The highlight at the start of word 4 gives 4.
+    private var trackingProgress: Double {
+        trackingProgress(atCharCount: highlightedCharCount)
+    }
+
+    /// The words read at highlight `charCount`, as trackingProgress.
+    private func trackingProgress(atCharCount charCount: Int) -> Double {
+        let (index, fraction) = activeWordFraction(charCount)
+        return Double(index) + fraction
+    }
+
+    /// Word Tracking: the line midY of every word, from the line layout. Nil
+    /// before the view has a width.
+    private func trackingLineYs() -> [CGFloat]? {
+        guard layoutWidth > 0 else { return nil }
+        let lineYs = WordFlowLayout(
+            words: words,
+            highlightedCharCount: highlightedCharCount,
+            font: font,
+            paragraphBreakBeforeWordIndices: paragraphBreakBeforeWordIndices,
+            containerWidth: layoutWidth
+        ).wordMidYs()
+        return !lineYs.isEmpty && lineYs.count == words.count ? lineYs : nil
+    }
+
+    /// The layout Y that tracking puts on the reading line at word progress
+    /// `progress`. Word Tracking slides it along the line (slidLineY), so
+    /// tracking, a look-around read and a follower all use one map. Classic
+    /// and Voice-Activated use smoothLayoutY.
+    private func readingY(forProgress progress: Double) -> CGFloat? {
+        if !smoothScroll, let lineYs = trackingLineYs() {
+            return Self.slidLineY(progress: progress, lineYs: lineYs)
+        }
+        return layoutY(forWordProgress: progress)
     }
 
     /// The Y of a word for word tracking, from the line layout. The measured
@@ -920,6 +1066,147 @@ struct SpeechScrollView: View {
         guard let y = wordY(clampedIdx) else { return nil }
         let nextY = wordY(clampedIdx + 1) ?? y
         return y + (nextY - y) * CGFloat(fraction)
+    }
+
+    // MARK: Word Tracking scroll target
+
+    /// Word Tracking: the response in seconds of the no-bounce spring that
+    /// moves the text for a reading step. ScrollTargetTests chose it with a
+    /// model of made-up readings: with a shorter spring the text stops and
+    /// starts again between results. A longer one leaves the text further
+    /// behind the reader.
+    static let readingSpringResponse: Double = 3.5
+
+    /// Word Tracking: the response in seconds of the no-bounce spring for
+    /// every other glide (a tap, a re-read, a catch-up, a resume or a new
+    /// layout). It ends in about 0.5 s, as the 0.5 s ease-out did.
+    static let quickSpringResponse: Double = 0.5
+
+    /// Word Tracking: a reading step this soon (in seconds) after a quick
+    /// glide is quick too. A slow spring that takes over a fast glide keeps
+    /// its speed, so it would carry the text past the target and back.
+    static let quickGlideSettle: Double = 0.8
+
+    /// Word Tracking: a forward step of more words than this is not one
+    /// result of normal reading (results bring 1 to 5 words). It is a
+    /// catch-up after a hold, the undo of a wrong re-read or a resume after
+    /// an ad-lib, and it takes the quick spring.
+    static let readingStepWords: Double = 5
+
+    /// Word Tracking: the layout Y that tracking puts on the reading line at
+    /// word progress `progress` (the words read: 3.5 is half of word 3). The
+    /// Y slides along each line as the reader moves through it: from the
+    /// line's own Y, at its first word, to the next line's Y, after its last
+    /// word. The last line stays at its own Y. The Y never goes back at a
+    /// new line. The reading spring keeps the text about half a line behind
+    /// this target while the reader speaks, so the line being read stays
+    /// near the reading line. `lineYs` has the line midY of each word
+    /// (WordFlowLayout.perWordMidYs).
+    static func slidLineY(progress: Double, lineYs: [CGFloat]) -> CGFloat? {
+        guard !lineYs.isEmpty, progress.isFinite else { return nil }
+        let count = lineYs.count
+        let clamped = min(max(progress, 0), Double(count))
+        let word = min(Int(clamped), count - 1)
+        let y = lineYs[word]
+        var first = word
+        while first > 0, lineYs[first - 1] == y { first -= 1 }
+        var end = word + 1
+        while end < count, lineYs[end] == y { end += 1 }
+        let next = end < count ? lineYs[end] : y
+        let fraction = CGFloat((clamped - Double(first)) / Double(end - first))
+        return y + (next - y) * fraction
+    }
+
+    /// Word Tracking: the word progress whose slidLineY is `y`. A Y above
+    /// the first line gives 0, and a Y on or below the last line gives the
+    /// word count. A look-around read uses it, so every screen puts the same
+    /// place on its reading line.
+    static func slidProgress(atY y: CGFloat, lineYs: [CGFloat]) -> Double? {
+        guard let firstY = lineYs.first, let lastY = lineYs.last else { return nil }
+        if y <= firstY { return 0 }
+        if y >= lastY { return Double(lineYs.count) }
+        var first = 0
+        while first < lineYs.count {
+            let lineY = lineYs[first]
+            var end = first + 1
+            while end < lineYs.count, lineYs[end] == lineY { end += 1 }
+            guard end < lineYs.count else { break }
+            let next = lineYs[end]
+            if y < next {
+                let fraction = (y - lineY) / (next - lineY)
+                return Double(first) + Double(end - first) * Double(min(1, max(0, fraction)))
+            }
+            first = end
+        }
+        return Double(lineYs.count)
+    }
+
+    /// Word Tracking: the scroll offset that puts layout Y `lineY` (from
+    /// slidLineY) on the reading line `readingLineY`. Near Top keeps the
+    /// text at the top until that Y reaches the reading line.
+    static func wordTrackingTarget(lineY: CGFloat, readingLineY: CGFloat, nearTop: Bool) -> CGFloat {
+        nearTop ? min(lineY, readingLineY) - lineY : readingLineY - lineY
+    }
+
+    /// What asks Word Tracking for a new scroll target.
+    enum TrackingStep {
+        /// The live highlight moved, and no look-around shows.
+        case reading
+        /// The live highlight moved during a look-around. The caller writes
+        /// the base and the peek offset in one transaction with animations
+        /// off, so the text stays still.
+        case still
+        /// Any other change: a tap, a pause, a resume, a page or a layout.
+        case other
+    }
+
+    /// How applyTrackingTarget shows a new tracking target.
+    enum TrackingMove: Equatable {
+        /// Not applied: a short move back that no deliberate event asked for.
+        case skip
+        /// Applied at once, in a transaction of its own.
+        case jump
+        /// Applied with the slow reading spring.
+        case readingGlide
+        /// Word Tracking: applied with the quick spring.
+        case quickGlide
+        /// A plain write: Classic and Voice-Activated (scrollOffsetAnimation
+        /// applies), or the caller's transaction during a look-around.
+        case plain
+    }
+
+    /// The tracking rules. Normal reading moves the text only forward. A
+    /// `deliberate` move (a re-read, a tap or a new layout) or one that
+    /// `allowsBack` is followed in either direction, and so is a move back
+    /// of more than `regressionThreshold`. In Word Tracking, a move of more
+    /// than `jumpLimit` is a jump with no animation. A forward reading step
+    /// that adds `words` (more than 0, at most readingStepWords) glides with
+    /// the reading spring, unless a quick glide may still run (`settling`).
+    /// Every other move takes the quick spring.
+    static func trackingMove(
+        from current: CGFloat,
+        to target: CGFloat,
+        step: TrackingStep,
+        words: Double,
+        deliberate: Bool,
+        allowsBack: Bool,
+        settling: Bool,
+        regressionThreshold: CGFloat,
+        jumpLimit: CGFloat,
+        smoothScroll: Bool
+    ) -> TrackingMove {
+        let applies = deliberate
+            || allowsBack
+            || target < current - 1
+            || target > current + regressionThreshold
+        guard applies else { return .skip }
+        if smoothScroll || step == .still { return .plain }
+        if abs(target - current) > jumpLimit { return .jump }
+        if step == .reading, !deliberate, !settling, target < current,
+           words > 0, words <= readingStepWords {
+            return .readingGlide
+        }
+        return .quickGlide
     }
 
     /// The height in this view where the active word sits.
@@ -1039,8 +1326,14 @@ struct SpeechScrollView: View {
         return abs(readY - wordY) < rowAdvance / 2
     }
 
-    private func repositionTracking(toWordIndex wordIndex: Int) {
-        guard let wordY = trackingWordY(wordIndex) else { return }
+    private func repositionTracking(toWordIndex wordIndex: Int, charCount: Int) {
+        // Word Tracking aims at the slid Y of the highlight that the tap
+        // sets (`charCount`), as tracking does. So the highlight update that
+        // follows the tap does not move the text again.
+        let wordY = smoothScroll
+            ? trackingWordY(wordIndex)
+            : readingY(forProgress: trackingProgress(atCharCount: charCount))
+        guard let wordY else { return }
 
         let target: CGFloat
         switch readingPosition {
@@ -1050,13 +1343,27 @@ struct SpeechScrollView: View {
                 wordY: wordY,
                 topOffset: initialScrollOffset(containerHeight: containerHeight)
             )
-        case .centered:
-            target = activeReadingLineY(containerHeight: containerHeight) - wordY
-        case .nearTop:
-            target = min(wordY, topReadingAnchor) - wordY
+        case .centered, .nearTop:
+            target = Self.wordTrackingTarget(
+                lineY: wordY,
+                readingLineY: activeReadingLineY(containerHeight: containerHeight),
+                nearTop: readingPosition == .nearTop
+            )
         }
 
         applyTrackingTarget(target, force: true)
+    }
+
+    /// Word Tracking: the highlight that a tap at `charOffset` sets. The
+    /// recognizer's jumpTo skips a [bracket] annotation, so a tap on one
+    /// lands on the next word that the reader says.
+    static func tapLandingOffset(words: [String], charOffset: Int) -> Int {
+        let text = words.joined(separator: " ")
+        return SpeechTextAlignment.advancePastAnnotations(
+            in: text,
+            ranges: SpeechTextAlignment.annotationRanges(in: text),
+            from: max(0, min(charOffset, text.count))
+        )
     }
 
     private var topReadingAnchor: CGFloat {
@@ -1109,31 +1416,70 @@ struct SpeechScrollView: View {
     /// corrections from speech recognition must not produce a down/up bounce.
     /// Explicit taps and manual scrolling opt into one backward reposition,
     /// and a highlight that moved back is followed in either direction.
-    private func applyTrackingTarget(_ target: CGFloat, force: Bool = false, followsBack: Bool = false) {
+    private func applyTrackingTarget(
+        _ target: CGFloat,
+        force: Bool = false,
+        followsBack: Bool = false,
+        step: TrackingStep = .other,
+        words: Double = 0
+    ) {
         // Other backward targets come from measured positions (smooth
         // scrolling) or from a layout change, such as a smaller font. Follow
         // only a large one.
         let regressionThreshold = (stableLineAdvance ?? 40) * 0.9
-        if followsBack
-            || force
-            || !hasAppliedTrackingTarget
-            || target < scrollOffset - 1
-            || target > scrollOffset + regressionThreshold
-            || allowsNextBackwardTrackingUpdate {
-            if !smoothScroll, abs(target - scrollOffset) > wordFlowCullingBuffer {
-                // Only the lines near the target are rendered, so a glide
-                // this long would pass through empty space. Jump instead.
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    scrollOffset = target
-                }
-            } else {
+        let now = ProcessInfo.processInfo.systemUptime
+        let move = Self.trackingMove(
+            from: scrollOffset,
+            to: target,
+            step: step,
+            words: words,
+            deliberate: followsBack || force || !hasAppliedTrackingTarget,
+            allowsBack: allowsNextBackwardTrackingUpdate,
+            settling: now - lastQuickGlide < Self.quickGlideSettle,
+            regressionThreshold: regressionThreshold,
+            jumpLimit: wordFlowCullingBuffer,
+            smoothScroll: smoothScroll
+        )
+        switch move {
+        case .skip:
+            break
+        case .jump:
+            // Only the lines near the target are rendered, so a glide
+            // this long would pass through empty space. Jump instead.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 scrollOffset = target
             }
+        case .readingGlide:
+            // A spring that replaces a running spring keeps its speed, so
+            // the reading steps join into one movement.
+            glide(to: target, response: Self.readingSpringResponse)
+        case .quickGlide:
+            lastQuickGlide = now
+            if isAnimatingReadingPositionChange {
+                // The Settings preview moves to a new reading position with
+                // its own curve.
+                scrollOffset = target
+            } else {
+                glide(to: target, response: Self.quickSpringResponse)
+            }
+        case .plain:
+            scrollOffset = target
         }
         hasAppliedTrackingTarget = true
         allowsNextBackwardTrackingUpdate = false
+    }
+
+    /// Word Tracking: move the base to `target` with a spring with no
+    /// bounce. The spring replaces the glide that runs, from where the text
+    /// is. Animations off keep the implicit 0.5 s curve from replacing it.
+    private func glide(to target: CGFloat, response: Double) {
+        var transaction = Transaction(animation: .spring(response: response, dampingFraction: 1))
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollOffset = target
+        }
     }
 
     private func wordIndex(at charOffset: Int) -> Int {
@@ -1149,6 +1495,12 @@ struct SpeechScrollView: View {
     /// Find the word progress at the current visual position (scrollOffset + manualOffset)
     private func wordProgressAtCurrentOffset() -> Double {
         let targetY = releaseReadLineY() - (scrollOffset + manualOffset)
+        // Word Tracking: the inverse of the slid reading Y, so a follower
+        // puts the same place on its own reading line.
+        if !smoothScroll, let lineYs = trackingLineYs(),
+           let progress = Self.slidProgress(atY: targetY, lineYs: lineYs) {
+            return progress
+        }
         // The line layout has every word, also on culled lines. The measured
         // positions are a fallback before the view has a width.
         let positions: [(Int, CGFloat)]
@@ -1171,24 +1523,14 @@ struct SpeechScrollView: View {
         )
     }
 
-    private func activeWordIndex() -> Int {
+    /// Returns (wordIndex, fractionThroughWord) at highlight `charCount`.
+    private func activeWordFraction(_ charCount: Int) -> (Int, Double) {
         var offset = 0
         for (i, word) in words.enumerated() {
             let end = offset + word.count
-            if highlightedCharCount <= end { return i }
-            offset = end + 1
-        }
-        return max(0, words.count - 1)
-    }
-
-    /// Returns (wordIndex, fractionThroughWord) for smooth interpolation
-    private func activeWordFraction() -> (Int, Double) {
-        var offset = 0
-        for (i, word) in words.enumerated() {
-            let end = offset + word.count
-            if highlightedCharCount <= end {
+            if charCount <= end {
                 let wordLen = max(1, word.count)
-                let into = highlightedCharCount - offset
+                let into = charCount - offset
                 return (i, Double(into) / Double(wordLen))
             }
             offset = end + 1
@@ -1245,6 +1587,24 @@ struct WordFlowLayout: View {
         guard let lineIndex = lines.firstIndex(where: { ($0.last?.id ?? -1) >= wordIndex }),
               let firstWord = lines[lineIndex].first, firstWord.id <= wordIndex,
               lineIndex + 1 < paragraphPrefixCounts.count else { return nil }
+        return lineMidY(
+            lineIndex,
+            paragraphPrefixCounts: paragraphPrefixCounts,
+            rowHeight: rowHeight,
+            lineSpacing: lineSpacing,
+            paragraphSpacing: paragraphSpacing
+        )
+    }
+
+    /// The midY of line `lineIndex`, as body places it: lineTop, the
+    /// paragraph divider space, then half a row.
+    static func lineMidY(
+        _ lineIndex: Int,
+        paragraphPrefixCounts: [Int],
+        rowHeight: CGFloat,
+        lineSpacing: CGFloat,
+        paragraphSpacing: CGFloat
+    ) -> CGFloat {
         let beginsParagraph = paragraphPrefixCounts[lineIndex + 1]
             > paragraphPrefixCounts[lineIndex]
         return CGFloat(lineIndex) * (rowHeight + lineSpacing)
@@ -1306,17 +1666,17 @@ struct WordFlowLayout: View {
     func wordMidYs() -> [CGFloat] {
         let (_, lines, paragraphPrefixCounts) = cachedLayout()
         let rowHeight = Self.rowHeight(for: font)
-        return Self.perWordMidYs(lines: lines.map { line in
-            (line.count, line.first.flatMap {
-                Self.layoutMidY(
-                    ofWordAt: $0.id,
-                    lines: lines,
-                    paragraphPrefixCounts: paragraphPrefixCounts,
-                    rowHeight: rowHeight,
-                    lineSpacing: lineSpacing,
-                    paragraphSpacing: paragraphDividerExtraSpacing
-                )
-            })
+        // One pass over the lines. Word Tracking calls this for each word
+        // and each look-around step, so it must not scan the lines again
+        // for each line, as layoutMidY does.
+        return Self.perWordMidYs(lines: lines.indices.map { index in
+            (lines[index].count, lines[index].isEmpty ? nil : Self.lineMidY(
+                index,
+                paragraphPrefixCounts: paragraphPrefixCounts,
+                rowHeight: rowHeight,
+                lineSpacing: lineSpacing,
+                paragraphSpacing: paragraphDividerExtraSpacing
+            ))
         })
     }
 
