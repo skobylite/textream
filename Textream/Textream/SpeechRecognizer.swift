@@ -10,6 +10,7 @@ import Foundation
 import Speech
 import AVFoundation
 import CoreAudio
+import OSLog
 
 private let waveformUpdatesPerSecond = 20.0
 private let speechCaptureBuffersPerSecond = 40.0
@@ -148,6 +149,20 @@ class SpeechRecognizer {
     /// against the text at the new offset.
     private var lastJumpAt: Date = .distantPast
 
+    /// The speech timing log: one line of numbers per listening session in
+    /// the system log. Off unless Textream starts with -speechTimingLog YES.
+    private static let timingLogOn = UserDefaults.standard.bool(forKey: "speechTimingLog")
+    private static let timingLogger = Logger(subsystem: "dev.fka.textream", category: "speechTiming")
+    /// Test switch -speechOnDevice YES: today's engine recognises on this Mac
+    /// only, without the 55 s restart.
+    private static let onDeviceTest = UserDefaults.standard.bool(forKey: "speechOnDevice")
+    @ObservationIgnored private var timing: SpeechTimingLog?
+    /// True while the on-device test switch is in use.
+    @ObservationIgnored private var onDeviceRecognition = false
+    /// Tap buffer sizes for the timing log. requestLock guards them.
+    @ObservationIgnored private var tapFrames = (min: 0, max: 0)
+    @ObservationIgnored private var tapRate = 0.0
+
     /// Update the source text while preserving the current recognized char count.
     /// Used by Director Mode to live-edit unread text without resetting read progress.
     func updateText(_ text: String, preservingCharCount: Int) {
@@ -164,6 +179,7 @@ class SpeechRecognizer {
         regressionUndo = nil
         regressionFloor = 0
         isOffScript = false
+        if Self.timingLogOn { timing?.setText(sourceText) }
     }
 
     /// Jump highlight to a specific char offset (e.g. when user taps a word).
@@ -199,6 +215,7 @@ class SpeechRecognizer {
     }
 
     func start(with text: String) {
+        timingEnd()
         // Clean up any previous session immediately so pending restarts
         // and stale taps are removed before the async auth callback fires.
         cleanupRecognition()
@@ -221,6 +238,7 @@ class SpeechRecognizer {
         shouldListen = true
         isListening = false
         isStarting = true
+        timingBegin()
         requestMicrophoneAccessAndBegin(for: sessionGeneration)
     }
 
@@ -291,6 +309,7 @@ class SpeechRecognizer {
     }
 
     private func failListening(_ message: String) {
+        timingEnd()
         voiceActivityDetector.reset()
         shouldListen = false
         isListening = false
@@ -300,6 +319,7 @@ class SpeechRecognizer {
     }
 
     func stop() {
+        timingEnd()
         shouldListen = false
         sessionGeneration &+= 1
         isListening = false
@@ -308,6 +328,7 @@ class SpeechRecognizer {
     }
 
     func forceStop() {
+        timingEnd()
         shouldListen = false
         sessionGeneration &+= 1
         isListening = false
@@ -323,6 +344,7 @@ class SpeechRecognizer {
 
     func resume() {
         guard !sourceText.isEmpty else { return }
+        timingEnd()
         cleanupRecognition()
         retryCount = 0
         recognizedCharCount = advancePastAnnotations(from: recognizedCharCount)
@@ -337,6 +359,7 @@ class SpeechRecognizer {
         shouldListen = true
         isListening = false
         isStarting = true
+        timingBegin()
         requestMicrophoneAccessAndBegin(for: sessionGeneration)
     }
 
@@ -378,6 +401,7 @@ class SpeechRecognizer {
     private func scheduleBeginRecognition(after delay: TimeInterval) {
         pendingRestart?.cancel()
         guard shouldListen, !sourceText.isEmpty else { return }
+        if Self.timingLogOn { timing?.restart(at: ProcessInfo.processInfo.systemUptime) }
         isListening = false
         isStarting = true
         let expectedSessionGeneration = sessionGeneration
@@ -452,6 +476,7 @@ class SpeechRecognizer {
             }
         }
 
+        onDeviceRecognition = false
         if requiresSpeechRecognition {
             speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: NotchSettings.shared.speechLocale))
             guard let speechRecognizer else {
@@ -481,6 +506,10 @@ class SpeechRecognizer {
             }
             recognitionRequest.shouldReportPartialResults = true
             recognitionRequest.taskHint = .dictation
+            onDeviceRecognition = Self.onDeviceTest && speechRecognizer.supportsOnDeviceRecognition
+            if onDeviceRecognition {
+                recognitionRequest.requiresOnDeviceRecognition = true
+            }
 
             // Add contextual strings from the source text to improve STT accuracy
             let upcoming = String(sourceText.dropFirst(matchStartOffset))
@@ -575,13 +604,16 @@ class SpeechRecognizer {
                 guard let self else { return }
                 if let result {
                     let spoken = result.bestTranscription.formattedString
+                    let isFinal = result.isFinal
                     DispatchQueue.main.async {
                         // Ignore stale results from a previous session
                         guard self.sessionGeneration == currentGeneration,
                               self.recognitionGeneration == currentRecognitionGeneration else { return }
                         self.retryCount = 0 // Reset on success
-                        self.lastSpokenText = spoken
-                        self.matchCharacters(spoken: spoken)
+                        self.matchResult(spoken, isFinal: isFinal)
+                        // The on-device test has no 55 s restart, so a final
+                        // result starts the next task.
+                        if isFinal && self.onDeviceRecognition { self.restartTask() }
                     }
                 }
                 if let error {
@@ -603,6 +635,7 @@ class SpeechRecognizer {
                         // or 216 (kAudioConverterErr_FormatNotSupported). Retry immediately for
                         // timeouts with no retry limit; use backoff for real errors.
                         let nsError = error as NSError
+                        if Self.timingLogOn { self.timing?.error(code: nsError.code) }
                         let isTimeout = nsError.code == 1110 || nsError.code == 216
 
                         if isTimeout {
@@ -635,7 +668,8 @@ class SpeechRecognizer {
             error = nil
             isStarting = false
             isListening = true
-            if requiresSpeechRecognition {
+            if Self.timingLogOn { timing?.ready(at: ProcessInfo.processInfo.systemUptime) }
+            if requiresSpeechRecognition && !onDeviceRecognition {
                 startPreemptiveTimer()
             }
         } catch {
@@ -672,11 +706,20 @@ class SpeechRecognizer {
             audioLevels.removeFirst()
         }
         voiceActivityDetector.process(level: level, at: ProcessInfo.processInfo.systemUptime)
+        if Self.timingLogOn, timing != nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            timing?.voice(active: voiceActivityDetector.isActive(at: now), at: now)
+        }
     }
 
     private func appendBufferToRequest(_ buffer: AVAudioPCMBuffer) {
         requestLock.lock()
         recognitionRequest?.append(buffer)
+        if Self.timingLogOn {
+            let frames = Int(buffer.frameLength)
+            tapFrames = tapFrames.max == 0 ? (frames, frames) : (min(tapFrames.min, frames), max(tapFrames.max, frames))
+            tapRate = buffer.format.sampleRate
+        }
         requestLock.unlock()
     }
 
@@ -691,6 +734,7 @@ class SpeechRecognizer {
             }
             return
         }
+        if Self.timingLogOn { timing?.restart(at: ProcessInfo.processInfo.systemUptime) }
         recognitionGeneration &+= 1
         let currentRecognitionGeneration = recognitionGeneration
         // Update match offset before restarting
@@ -715,6 +759,9 @@ class SpeechRecognizer {
         let newRequest = SFSpeechAudioBufferRecognitionRequest()
         newRequest.shouldReportPartialResults = true
         newRequest.taskHint = .dictation
+        if onDeviceRecognition {
+            newRequest.requiresOnDeviceRecognition = true
+        }
 
         // Add contextual strings for the remaining text
         let upcoming = String(sourceText.dropFirst(matchStartOffset))
@@ -759,12 +806,13 @@ class SpeechRecognizer {
             guard let self else { return }
             if let result {
                 let spoken = result.bestTranscription.formattedString
+                let isFinal = result.isFinal
                 DispatchQueue.main.async {
                     guard self.sessionGeneration == currentGeneration,
                           self.recognitionGeneration == currentRecognitionGeneration else { return }
                     self.retryCount = 0
-                    self.lastSpokenText = spoken
-                    self.matchCharacters(spoken: spoken)
+                    self.matchResult(spoken, isFinal: isFinal)
+                    if isFinal && self.onDeviceRecognition { self.restartTask() }
                 }
             }
             if let error {
@@ -781,6 +829,7 @@ class SpeechRecognizer {
                     self.matchStartOffset = self.recognizedCharCount
 
                     let nsError = error as NSError
+                    if Self.timingLogOn { self.timing?.error(code: nsError.code) }
                     let isTimeout = nsError.code == 1110 || nsError.code == 216
 
                     if isTimeout {
@@ -801,7 +850,9 @@ class SpeechRecognizer {
             }
         }
 
-        startPreemptiveTimer()
+        if !onDeviceRecognition {
+            startPreemptiveTimer()
+        }
     }
 
     // MARK: - Pre-emptive restart timer
@@ -817,6 +868,50 @@ class SpeechRecognizer {
     private func stopPreemptiveTimer() {
         preemptiveRestartTimer?.invalidate()
         preemptiveRestartTimer = nil
+    }
+
+    // MARK: - Speech timing log (numbers only, off by default)
+
+    /// Matches a new result. With the timing log on, it also records the
+    /// result and the highlight move.
+    private func matchResult(_ spoken: String, isFinal: Bool) {
+        guard Self.timingLogOn, timing != nil else {
+            lastSpokenText = spoken
+            matchCharacters(spoken: spoken)
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        timing?.result(isFinal: isFinal, reset: SpeechTimingLog.isReset(from: lastSpokenText, to: spoken), at: now)
+        let before = recognizedCharCount
+        lastSpokenText = spoken
+        matchCharacters(spoken: spoken)
+        timing?.move(from: before, to: recognizedCharCount,
+                     voiceActive: voiceActivityDetector.isActive(at: now), at: now)
+    }
+
+    /// Starts the numbers of a listening session (Word Tracking only).
+    private func timingBegin() {
+        guard Self.timingLogOn else { return }
+        timingEnd()
+        guard NotchSettings.shared.listeningMode == .wordTracking else { return }
+        timing = SpeechTimingLog(text: sourceText, at: ProcessInfo.processInfo.systemUptime)
+        requestLock.lock()
+        tapFrames = (0, 0)
+        requestLock.unlock()
+    }
+
+    /// Writes the summary line of the session to the system log.
+    private func timingEnd() {
+        guard Self.timingLogOn, let log = timing else { return }
+        timing = nil
+        var context = SpeechTimingLog.Context()
+        context.onDevice = onDeviceRecognition
+        requestLock.lock()
+        context.bufferFrames = tapFrames
+        context.micRate = tapRate
+        requestLock.unlock()
+        let line = log.summary(at: ProcessInfo.processInfo.systemUptime, context)
+        Self.timingLogger.notice("\(line, privacy: .public)")
     }
 
     // MARK: - Fuzzy character-level matching
